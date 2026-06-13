@@ -232,6 +232,29 @@ template void checkCombedPlanarAnalyze_core<uint8_t>(const VSVideoInfo *vi, int 
 template void checkCombedPlanarAnalyze_core<uint16_t>(const VSVideoInfo *vi, int cthresh, bool chroma, const CPUFeatures *cpuFlags, int metric, const VSFrameRef *src, VSFrameRef* cmask, const VSAPI *vsapi);
 
 
+VSFrameRef *createCombedMaskFrame(const VSVideoInfo *vi, const VSFrameRef *src, int cthresh, bool chroma, int metric,
+  const CPUFeatures *cpuFlags, const VSFormat *maskFormat, const VSAPI *vsapi, VSCore *core)
+{
+  VSFrameRef *cmask = vsapi->newVideoFrame(vi->format, vi->width, vi->height, nullptr, core);
+  if (vi->format->bytesPerSample == 1)
+    checkCombedPlanarAnalyze_core<uint8_t>(vi, cthresh, chroma, cpuFlags, metric, src, cmask, vsapi);
+  else
+    checkCombedPlanarAnalyze_core<uint16_t>(vi, cthresh, chroma, cpuFlags, metric, src, cmask, vsapi);
+  VSFrameRef *dst = vsapi->newVideoFrame(maskFormat, vi->width, vi->height, src, core);
+  const uint8_t *srcp = vsapi->getReadPtr(cmask, 0);
+  const int src_pitch = vsapi->getStride(cmask, 0);
+  uint8_t *dstp = vsapi->getWritePtr(dst, 0);
+  const int dst_pitch = vsapi->getStride(dst, 0);
+  for (int y = 0; y < vi->height; ++y) {
+    memcpy(dstp, srcp, vi->width);
+    srcp += src_pitch;
+    dstp += dst_pitch;
+  }
+  vsapi->freeFrame(cmask);
+  return dst;
+}
+
+
 bool TFM::checkCombedPlanar(const VSFrameRef *src, int n, int match,
   int *blockN, int &xblocksi, int *mics, bool ddebug, bool _chroma)
 {

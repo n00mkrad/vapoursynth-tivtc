@@ -35,6 +35,30 @@ enum _FieldBased {
     TopFieldFirst = 2
 };
 
+const VSVideoInfo *TFM::getOutputVideoInfo() const
+{
+  return maskOutput ? &maskVi : vi;
+}
+
+
+const VSFrameRef *TFM::returnCombedMask(VSFrameRef *dst, const VSFrameRef *prv, const VSFrameRef *src,
+  const VSFrameRef *nxt, VSFrameRef *tmp, int n, int fmatch, int combed, bool d2vfilm, VSCore *core)
+{
+  (void)d2vfilm;
+  VSFrameRef *mask = createCombedMaskFrame(vi, dst, cthresh, chroma, metric, &cpuFlags, maskFormat, vsapi, core);
+  lastMatch.frame = n;
+  lastMatch.match = fmatch;
+  lastMatch.field = field;
+  lastMatch.combed = combed;
+  vsapi->freeFrame(prv);
+  vsapi->freeFrame(src);
+  vsapi->freeFrame(nxt);
+  vsapi->freeFrame(tmp);
+  vsapi->freeFrame(dst);
+  return mask;
+}
+
+
 const VSFrameRef *TFM::GetFrame(int n, int activationReason, VSFrameContext *frameCtx, VSCore *core)
 {
   if (n < 0) n = 0;
@@ -115,6 +139,8 @@ const VSFrameRef *TFM::GetFrame(int n, int activationReason, VSFrameContext *fra
       else combed = 0;
     }
     d2vfilm = d2vduplicate(fmatch, combed, n);
+    if (maskOutput)
+      return returnCombedMask(dst, prv, src, nxt, tmp, n, fmatch, combed, d2vfilm, core);
     if (micout > 0)
     {
       for (int i = 0; i < 5; ++i)
@@ -474,6 +500,8 @@ d2vCJump:
     }
   }
   d2vfilm = d2vduplicate(fmatch, combed, n);
+  if (maskOutput)
+    return returnCombedMask(dst, prv, src, nxt, tmp, n, fmatch, combed, d2vfilm, core);
   fileOut(fmatch, combed, d2vfilm, n, mics[fmatch], mics);
   if (display) writeDisplay(dst, n, fmatch, combed, false, blockN[fmatch], xblocks,
     d2vmatch, mics, prv, src, nxt);
@@ -613,19 +641,19 @@ void TFM::writeDisplay(VSFrameRef *dst, int n, int fmatch, int combed, bool over
 //    drawBox(dst, blockx, blocky, blockN, xblocks, vi);
 //  }
 
-  std::string text = "TFM " VERSION " by tritical\n";
+  std::string text = "";
 
   if (PP > 0)
-    snprintf(buf, SZ, "order = %d  field = %d  mode = %d  MI = %d\n", order, field, mode, MI);
+    snprintf(buf, SZ, "order=%d field=%d mode=%d MI=%d\n", order, field, mode, MI);
   else
-    snprintf(buf, SZ, "order = %d  field = %d  mode = %d\n", order, field, mode);
+    snprintf(buf, SZ, "order=%d field=%d mode=%d\n", order, field, mode);
   text += buf;
 
-  if (!over && !d2vmatch) snprintf(buf, SZ, "frame: %d  match = %c %s\n", n, MTC(fmatch),
+  if (!over && !d2vmatch) snprintf(buf, SZ, "frame=%d match=%c %s\n", n, MTC(fmatch),
     ((ubsco || mmsco || flags == 5) && checkSceneChange(prv, src, nxt, n)) ? " (SC) " : "");
-  else if (d2vmatch) snprintf(buf, SZ, "frame: %d  match = %c (D2V) %s\n", n, MTC(fmatch),
+  else if (d2vmatch) snprintf(buf, SZ, "frame=%d match=%c (D2V) %s\n", n, MTC(fmatch),
     ((ubsco || mmsco || flags == 5) && checkSceneChange(prv, src, nxt, n)) ? " (SC) " : "");
-  else snprintf(buf, SZ, "frame: %d  match = %c (OVR) %s\n", n, MTC(fmatch),
+  else snprintf(buf, SZ, "frame=%d match=%c (OVR) %s\n", n, MTC(fmatch),
     ((ubsco || mmsco || flags == 5) && checkSceneChange(prv, src, nxt, n)) ? " (SC) " : "");
   text += buf;
 
@@ -634,29 +662,29 @@ void TFM::writeDisplay(VSFrameRef *dst, int n, int fmatch, int combed, bool over
   {
     if (micout == 1 && mics[0] != -20 && mics[1] != -20 && mics[2] != -20 && micmatching == 0)
     {
-      snprintf(buf, SZ, "MICS:  p = %d  c = %d  n = %d\n", mics[0], mics[1], mics[2]);
+      snprintf(buf, SZ, "MICS:  p=%d c=%d n=%d\n", mics[0], mics[1], mics[2]);
       text + buf;
     }
     else if ((micout == 2 && mics[0] != -20 && mics[1] != -20 && mics[2] != -20 &&
       mics[3] != -20 && mics[4] != -20) || micmatching > 0)
     {
-      snprintf(buf, SZ, "MICS:  p = %d  c = %d  n = %d\n", mics[0], mics[1], mics[2]);
+      snprintf(buf, SZ, "MICS:  p=%d c=%d n=%d\n", mics[0], mics[1], mics[2]);
       text += buf;
-      snprintf(buf, SZ, "       b = %d  u = %d\n", mics[3], mics[4]);
+      snprintf(buf, SZ, "       b=%d u=%d\n", mics[3], mics[4]);
       text += buf;
     }
   }
 
   if (combed != -1)
   {
-    if (combed == 1) snprintf(buf, SZ, "PP = %d  CLEAN FRAME (forced!) ", PP);
-    else if (combed == 5) snprintf(buf, SZ, "PP = %d  COMBED FRAME  (forced!) ", PP);
-    else if (combed == 0) snprintf(buf, SZ, "PP = %d  CLEAN FRAME ", PP);
-    else snprintf(buf, SZ, "PP = %d  COMBED FRAME ", PP);
+    if (combed == 1) snprintf(buf, SZ, "PP=%d CLEAN FRAME (forced!) ", PP);
+    else if (combed == 5) snprintf(buf, SZ, "PP=%d COMBED FRAME  (forced!) ", PP);
+    else if (combed == 0) snprintf(buf, SZ, "PP=%d CLEAN FRAME ", PP);
+    else snprintf(buf, SZ, "PP=%d COMBED FRAME ", PP);
     if (mics[fmatch] >= 0)
     {
       char buft[20];
-      snprintf(buft, 20, " MIC = %d ", mics[fmatch]);
+      snprintf(buft, 20, " MIC=%d ", mics[fmatch]);
       strcat(buf, buft);
     }
 
@@ -1167,9 +1195,9 @@ int TFM::compareFields_core(const VSFrameRef *prv, const VSFrameRef *src, const 
   }
 //  if (debug)
 //  {
-//    sprintf(buf, "TFM:  frame %d  - comparing %c to %c\n", n, MTC(match1), MTC(match2));
+//    sprintf(buf, "TFM:  frame %d - comparing %c to %c\n", n, MTC(match1), MTC(match2));
 //    OutputDebugString(buf);
-//    sprintf(buf, "TFM:  frame %d  - nmatches:  %d vs %d (%3.1f)  mmatches:  %d vs %d (%3.1f)\n", n,
+//    sprintf(buf, "TFM:  frame %d - nmatches:  %d vs %d (%3.1f)  mmatches:  %d vs %d (%3.1f)\n", n,
 //      norm1, norm2, c1, mtn1, mtn2, c2);
 //    OutputDebugString(buf);
 //  }
@@ -1572,9 +1600,9 @@ int TFM::compareFieldsSlow_core(const VSFrameRef *prv, const VSFrameRef *src, co
   }
 //  if (debug)
 //  {
-//    sprintf(buf, "TFM:  frame %d  - comparing %c to %c  (SLOW 1)\n", n, MTC(match1), MTC(match2));
+//    sprintf(buf, "TFM:  frame %d - comparing %c to %c  (SLOW 1)\n", n, MTC(match1), MTC(match2));
 //    OutputDebugString(buf);
-//    sprintf(buf, "TFM:  frame %d  - nmatches:  %d vs %d (%3.1f)  mmatches:  %d vs %d (%3.1f)\n", n,
+//    sprintf(buf, "TFM:  frame %d - nmatches:  %d vs %d (%3.1f)  mmatches:  %d vs %d (%3.1f)\n", n,
 //      norm1, norm2, c1, mtn1, mtn2, c2);
 //    OutputDebugString(buf);
 //  }
@@ -2373,9 +2401,9 @@ int TFM::compareFieldsSlow2_core(const VSFrameRef *prv, const VSFrameRef *src, c
   }
 //  if (debug)
 //  {
-//    sprintf(buf, "TFM:  frame %d  - comparing %c to %c  (SLOW 2)\n", n, MTC(match1), MTC(match2));
+//    sprintf(buf, "TFM:  frame %d - comparing %c to %c  (SLOW 2)\n", n, MTC(match1), MTC(match2));
 //    OutputDebugString(buf);
-//    sprintf(buf, "TFM:  frame %d  - nmatches:  %d vs %d (%3.1f)  mmatches:  %d vs %d (%3.1f)\n", n,
+//    sprintf(buf, "TFM:  frame %d - nmatches:  %d vs %d (%3.1f)  mmatches:  %d vs %d (%3.1f)\n", n,
 //      norm1, norm2, c1, mtn1, mtn2, c2);
 //    OutputDebugString(buf);
 //  }
@@ -2548,7 +2576,7 @@ bool TFM::checkSceneChange_core(const VSFrameRef *prv, const VSFrameRef *src, co
   
 //  if (debug)
 //  {
-//    sprintf(buf, "TFM:  frame %d  - diffp = %u   diffn = %u  diffmaxsc = %u  %c\n", n, (unsigned int)diffp, (unsigned int)diffn, (unsigned int)diffmaxsc,
+//    sprintf(buf, "TFM:  frame %d - diffp = %u   diffn = %u  diffmaxsc = %u  %c\n", n, (unsigned int)diffp, (unsigned int)diffn, (unsigned int)diffmaxsc,
 //      (diffp > diffmaxsc || diffn > diffmaxsc) ? 'T' : 'F');
 //    OutputDebugString(buf);
 //  }
@@ -2735,21 +2763,22 @@ template void TFM::buildABSDiffMask<uint16_t>(const uint8_t* prvp, const uint8_t
 //}
 
 TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const char* _ovr,
-  const char* _input, const char* _output, const char * _outputC, bool _debug, bool _display,
+  const char* _ovr_s, const char* _input, const char* _output, const char * _outputC, bool _debug, bool _display,
   int _slow, bool _mChroma, int _cNum, int _cthresh, int _MI, bool _chroma, int _blockx,
   int _blocky, int _y0, int _y1, const char* _d2v, int _ovrDefault, int _flags, double _scthresh,
   int _micout, int _micmatching, const char* _trimIn, bool _usehints, int _metric, bool _batch,
-  bool _ubsco, bool _mmsco, int _opt, const VSAPI *_vsapi, VSCore *core)
+  bool _ubsco, bool _mmsco, int _opt, bool _maskOutput, const VSAPI *_vsapi, VSCore *core)
     : vsapi(_vsapi), child(_child),
-  order(_order), field(_field), mode(_mode), PP(_PP), ovr(_ovr), input(_input), output(_output),
+  order(_order), field(_field), mode(_mode), PP(_PP), ovr(_ovr), ovr_s(_ovr_s), input(_input), output(_output),
   outputC(_outputC), debug(_debug), display(_display), slow(_slow), mChroma(_mChroma), cNum(_cNum),
   cthresh(_cthresh), MI(_MI), chroma(_chroma), blockx(_blockx), blocky(_blocky), y0(_y0),
   y1(_y1), d2v(_d2v), ovrDefault(_ovrDefault), flags(_flags), scthresh(_scthresh), micout(_micout),
   micmatching(_micmatching), trimIn(_trimIn), usehints(_usehints), metric(_metric),
-  batch(_batch), ubsco(_ubsco), mmsco(_mmsco), opt(_opt), cArray(nullptr, nullptr), tbuffer(nullptr, nullptr),
+  batch(_batch), ubsco(_ubsco), mmsco(_mmsco), opt(_opt), maskOutput(_maskOutput), maskFormat(nullptr), cArray(nullptr, nullptr), tbuffer(nullptr, nullptr),
   map(nullptr, nullptr), cmask(nullptr, nullptr)
 {
     vi = vsapi->getVideoInfo(child);
+    maskVi = *vi;
 
   int z, w, q = 0, b, i, count, last, fieldt, firstLine, qt;
   int countOvrS, countOvrM;
@@ -2777,6 +2806,8 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
     throw TIVTCError("TFM:  height and width must be divisible by 2!");
   if (vi->height < 6 || vi->width < 64)
     throw TIVTCError("TFM:  frame dimensions too small!");
+  maskFormat = vsapi->registerFormat(cmGray, stInteger, 8, 0, 0, core);
+  maskVi.format = maskFormat;
   if (mode < 0 || mode > 7)
     throw TIVTCError("TFM:  mode must be set to 0, 1, 2, 3, 4, 5, 6, or 7!");
   if (field < -1 || field > 1)
@@ -3067,12 +3098,14 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
     }
     else throw TIVTCError("TFM:  input file error (could not open file)!");
   }
-  if (ovr.size())
+  if (ovr.size() || ovr_s.size())
   {
-    if ((f = decltype (f)(tivtc_fopen(ovr.c_str(), "r"), &fclose)) != nullptr)
+    const bool ovrFromString = ovr_s.size() != 0;
+    TIVTCLineReader ovrReader(ovrFromString ? ovr_s.c_str() : ovr.c_str(), ovrFromString);
+    if (ovrReader.opened())
     {
       countOvrS = countOvrM = 0;
-      while (fgets(linein, 1024, f.get()) != nullptr)
+      while (ovrReader.getLine(linein, 1024) != nullptr)
       {
         if (linein[0] == 0 || linein[0] == '\n' || linein[0] == '\r' || linein[0] == ';' || linein[0] == '#')
           continue;
@@ -3125,7 +3158,8 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
       fieldt = fieldO;
       firstLine = 0;
       i = 0;
-      if ((f = decltype (f)(tivtc_fopen(ovr.c_str(), "r"), &fclose)) != nullptr)
+      ovrReader.reset();
+      if (ovrReader.opened())
       {
 //        if (debug)
 //        {
@@ -3133,7 +3167,7 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
 //            fieldt == 0 ? "bottom" : "top");
 //          OutputDebugString(buf);
 //        }
-        while (fgets(linein, 1024, f.get()) != nullptr)
+        while (ovrReader.getLine(linein, 1024) != nullptr)
         {
           if (linein[0] == 0 || linein[0] == '\n' || linein[0] == '\r' || linein[0] == ';' || linein[0] == '#')
             continue;
@@ -3548,9 +3582,9 @@ TFM::~TFM()
             if (moutArrayE[i] == -20) moutArrayE[i] = -1;
           }
         }
-        fprintf(f, "#TFM %s by tritical\n", VERSION);
-        fprintf(f, "field = %s\n", fieldO == 1 ? "top" : "bottom");
-        fprintf(f, "crc32 = %x\n", outputCrc);
+        // fprintf(f, "#TFM %s by tritical\n", VERSION);
+        fprintf(f, "field=%s\n", fieldO == 1 ? "top" : "bottom");
+        fprintf(f, "crc32=%x\n", outputCrc);
         for (int h = 0; h <= nfrms; ++h)
         {
           if (outArray[h] & FILE_ENTRY)
@@ -3592,7 +3626,7 @@ TFM::~TFM()
       if ((f = tivtc_fopen(outputCFull, "w")) != nullptr)
       {
         int count = 0, match;
-        fprintf(f, "#TFM %s by tritical\n", VERSION);
+        // fprintf(f, "#TFM %s by tritical\n", VERSION);
         for (int h = 0; h <= nfrms; ++h)
         {
           if (outArray[h] & FILE_ENTRY) match = (outArray[h] & 0x07);

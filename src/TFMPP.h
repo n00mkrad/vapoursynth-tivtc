@@ -80,6 +80,7 @@ private:
 
   int PP, mthresh;
   std::string ovr;
+  std::string ovr_s;
   bool display;
   VSNodeRef *clip2;
   bool usehints;
@@ -150,7 +151,7 @@ public:
   const VSVideoInfo *vi;
 
   const VSFrameRef *GetFrame(int n, int activationReason, VSFrameContext *frameCtx, VSCore *core);
-  TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, bool _display, VSNodeRef *_clip2,
-    bool _usehints, int _opt, const VSAPI *_vsapi, VSCore *core);
+  TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, const char* _ovr_s, bool _display,
+    VSNodeRef *_clip2, bool _usehints, int _opt, const VSAPI *_vsapi, VSCore *core);
   ~TFMPP();
 };

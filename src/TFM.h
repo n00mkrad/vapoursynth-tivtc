@@ -48,8 +48,12 @@
 template<int planarType>
 void FillCombedPlanarUpdateCmaskByUV(VSFrameRef* cmask, const VSAPI *vsapi);
 
+VSFrameRef *createCombedMaskFrame(const VSVideoInfo *vi, const VSFrameRef *src, int cthresh, bool chroma, int metric,
+  const CPUFeatures *cpuFlags, const VSFormat *maskFormat, const VSAPI *vsapi, VSCore *core);
+
 template<typename pixel_t>
-void checkCombedPlanarAnalyze_core(const VSVideoInfo *vi, int cthresh, bool chroma, int cpuFlags, int metric, const VSFrameRef *src, VSFrameRef* cmask, const VSAPI *vsapi);
+void checkCombedPlanarAnalyze_core(const VSVideoInfo *vi, int cthresh, bool chroma, const CPUFeatures *cpuFlags, int metric,
+  const VSFrameRef *src, VSFrameRef* cmask, const VSAPI *vsapi);
 
 struct MTRACK {
   int frame, match;
@@ -74,6 +78,7 @@ private:
   int PP; // modified in GetFrame
   // TFM must store a copy of the string obtained from propGetData, because that pointer doesn't live forever.
   std::string ovr; // override file name
+  std::string ovr_s; // override string
   std::string input;
   std::string output;
   std::string outputC;
@@ -96,6 +101,9 @@ private:
   bool metric;
   bool batch, ubsco, mmsco;
   int opt;
+  bool maskOutput;
+  const VSFormat *maskFormat;
+  VSVideoInfo maskVi;
 
   int PP_origSaved, MI_origSaved;
   int order_origSaved, field_origSaved, mode_origSaved;
@@ -182,6 +190,9 @@ private:
 //  template<typename pixel_t>
 //  void putHint_core(VSFrameRef *dst, int match, int combed, bool d2vfilm);
 
+  const VSFrameRef *returnCombedMask(VSFrameRef *dst, const VSFrameRef *prv, const VSFrameRef *src,
+    const VSFrameRef *nxt, VSFrameRef *tmp, int n, int fmatch, int combed, bool d2vfilm, VSCore *core);
+
   void parseD2V();
   int D2V_find_and_correct(std::vector<int> &array, bool &found, int &tff) const;
   void D2V_find_fix(int a1, int a2, int sync, int &f1, int &f2, int &change) const;
@@ -218,16 +229,17 @@ private:
 
 public:
       const VSVideoInfo *vi;
+  const VSVideoInfo *getOutputVideoInfo() const;
 
   const VSFrameRef *GetFrame(int n, int activationReason, VSFrameContext *frameCtx, VSCore *core);
 /// implement as tivtc.IsCombed(), if it's different from tdm.IsCombed().
   //  AVSValue ConditionalIsCombedTIVTC(int n, IScriptEnvironment* env);
-  TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const char* _ovr, const char* _input,
-    const char* _output, const char * _outputC, bool _debug, bool _display, int _slow,
+  TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const char* _ovr, const char* _ovr_s,
+    const char* _input, const char* _output, const char * _outputC, bool _debug, bool _display, int _slow,
     bool _mChroma, int _cNum, int _cthresh, int _MI, bool _chroma, int _blockx, int _blocky,
     int _y0, int _y1, const char* _d2v, int _ovrDefault, int _flags, double _scthresh, int _micout,
     int _micmatching, const char* _trimIn, bool _usehints, int _metric, bool _batch, bool _ubsco,
-    bool _mmsco, int _opt, const VSAPI *_vsapi, VSCore *core);
+    bool _mmsco, int _opt, bool _maskOutput, const VSAPI *_vsapi, VSCore *core);
   ~TFM();
 
 //  int __stdcall SetCacheHints(int cachehints, int frame_range) override {

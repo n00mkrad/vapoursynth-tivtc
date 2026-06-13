@@ -1,9 +1,11 @@
 #ifndef __Internal_H__
 #define __Internal_H__
 
-#include <stdexcept>
 #include <cstring>
 #include <cstdio>
+#include <memory>
+#include <stdexcept>
+#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -97,6 +99,57 @@ static FILE *tivtc_fopen(const char *name, const char *mode) {
     return std::fopen(name, mode);
 #endif
 }
+
+
+// Reads override data from a file or a string while preserving fgets-style line handling.
+class TIVTCLineReader {
+private:
+    bool fromString;
+    std::string text;
+    size_t position;
+    std::unique_ptr<FILE, decltype (&fclose)> file;
+
+public:
+    TIVTCLineReader(const char *source, bool _fromString)
+        : fromString(_fromString), text(_fromString ? source : ""), position(0), file(nullptr, &fclose)
+    {
+        if (!fromString)
+            file = decltype(file)(tivtc_fopen(source, "r"), &fclose);
+    }
+
+    bool opened() const
+    {
+        return fromString || file != nullptr;
+    }
+
+    void reset()
+    {
+        if (fromString)
+            position = 0;
+        else if (file)
+            std::rewind(file.get());
+    }
+
+    char *getLine(char *buffer, int bufferSize)
+    {
+        if (bufferSize <= 0)
+            return nullptr;
+        if (!fromString)
+            return file ? std::fgets(buffer, bufferSize, file.get()) : nullptr;
+        if (position >= text.size())
+            return nullptr;
+        int copied = 0;
+        while (copied < bufferSize - 1 && position < text.size())
+        {
+            char c = text[position++];
+            buffer[copied++] = c;
+            if (c == '\n')
+                break;
+        }
+        buffer[copied] = 0;
+        return buffer;
+    }
+};
 
 
 #endif  // __Internal_H__

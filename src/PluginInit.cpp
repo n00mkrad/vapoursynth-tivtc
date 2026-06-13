@@ -42,7 +42,7 @@ static void VS_CC tfmInit(VSMap *in, VSMap *out, void **instanceData, VSNode *no
 
     TFM *d = (TFM *) *instanceData;
 
-    vsapi->setVideoInfo(d->vi, 1, node);
+    vsapi->setVideoInfo(d->getOutputVideoInfo(), 1, node);
 }
 
 
@@ -62,6 +62,70 @@ static void VS_CC tfmFree(void *instanceData, VSCore *core, const VSAPI *vsapi) 
 
     TFM *d = (TFM *)instanceData;
 
+    delete d;
+}
+
+
+struct TFMCombedMaskData {
+    const VSAPI *vsapi;
+    VSNodeRef *child;
+    const VSVideoInfo *vi;
+    VSVideoInfo viOut;
+    const VSFormat *maskFormat;
+    CPUFeatures cpuFlags;
+    int cthresh;
+    bool chroma;
+    int metric;
+};
+
+
+static void setTFMCombedMaskError(VSMap *out, const char *message, const VSAPI *vsapi) {
+    char error[1024] = { 0 };
+    if (strncmp(message, "TFM:", 4) == 0)
+        snprintf(error, 1024, "TFMCombedMask:%s", message + 4);
+    else
+        snprintf(error, 1024, "TFMCombedMask: %s", message);
+    vsapi->setError(out, error);
+}
+
+
+static void VS_CC tfmCombedMaskInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
+    (void)in;
+    (void)out;
+    (void)core;
+
+    TFMCombedMaskData *d = (TFMCombedMaskData *) *instanceData;
+
+    vsapi->setVideoInfo(&d->viOut, 1, node);
+}
+
+
+static const VSFrameRef *VS_CC tfmCombedMaskGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+    (void)frameData;
+    (void)vsapi;
+
+    TFMCombedMaskData *d = (TFMCombedMaskData *) *instanceData;
+
+    if (activationReason == arInitial) {
+        d->vsapi->requestFrameFilter(n, d->child, frameCtx);
+        return nullptr;
+    } else if (activationReason != arAllFramesReady) {
+        return nullptr;
+    }
+
+    const VSFrameRef *src = d->vsapi->getFrameFilter(n, d->child, frameCtx);
+    VSFrameRef *dst = createCombedMaskFrame(d->vi, src, d->cthresh, d->chroma, d->metric, &d->cpuFlags, d->maskFormat, d->vsapi, core);
+    d->vsapi->freeFrame(src);
+    return dst;
+}
+
+
+static void VS_CC tfmCombedMaskFree(void *instanceData, VSCore *core, const VSAPI *vsapi) {
+    (void)core;
+
+    TFMCombedMaskData *d = (TFMCombedMaskData *)instanceData;
+
+    vsapi->freeNode(d->child);
     delete d;
 }
 
@@ -159,6 +223,15 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
     const char *ovr = vsapi->propGetData(in, "ovr", 0, &err);
     if (err)
         ovr = "";
+
+    const char *ovr_s = vsapi->propGetData(in, "ovr_s", 0, &err);
+    if (err)
+        ovr_s = "";
+
+    if (ovr[0] && ovr_s[0]) {
+        vsapi->setError(out, "TFM: only one of ovr and ovr_s can be set!");
+        return;
+    }
 
     const char *input = vsapi->propGetData(in, "input", 0, &err);
     if (err)
@@ -282,9 +355,9 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
     TFM *tfm_data;
 
     try {
-        tfm_data = new TFM(clip, order, field, mode, PP, ovr, input, output, outputC, debug, display, slow, mChroma, cNum, cthresh,
+        tfm_data = new TFM(clip, order, field, mode, PP, ovr, ovr_s, input, output, outputC, debug, display, slow, mChroma, cNum, cthresh,
                        MI, chroma, blockx, blocky, y0, y1, d2v, ovrDefault, flags, scthresh, micout, micmatching, trimIn, hint,
-                       metric, batch, ubsco, mmsco, opt, vsapi, core);
+                       metric, batch, ubsco, mmsco, opt, false, vsapi, core);
     } catch (const TIVTCError& e) {
         vsapi->setError(out, e.what());
 
@@ -335,7 +408,7 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
         TFMPP *tfmpp_data;
 
         try {
-            tfmpp_data = new TFMPP(node, PP, mthresh, ovr, display, clip2, hint, opt, vsapi, core);
+            tfmpp_data = new TFMPP(node, PP, mthresh, ovr, ovr_s, display, clip2, hint, opt, vsapi, core);
         } catch (const TIVTCError& e) {
             vsapi->setError(out, e.what());
 
@@ -377,6 +450,229 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
         vsapi->propSetNode(out, "clip", node, paReplace);
         vsapi->freeNode(node);
     }
+}
+
+
+static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userData, VSCore *core, const VSAPI *vsapi) {
+    (void)userData;
+
+    int err;
+
+    int analysis = int64ToIntS(vsapi->propGetInt(in, "analysis", 0, &err));
+    if (err)
+        analysis = 0;
+
+    int order = int64ToIntS(vsapi->propGetInt(in, "order", 0, &err));
+    if (err)
+        order = -1;
+
+    int field = int64ToIntS(vsapi->propGetInt(in, "field", 0, &err));
+    if (err)
+        field = -1;
+
+    int mode = int64ToIntS(vsapi->propGetInt(in, "mode", 0, &err));
+    if (err)
+        mode = 1;
+
+    int PP = int64ToIntS(vsapi->propGetInt(in, "PP", 0, &err));
+    if (err)
+        PP = 6;
+
+    const char *ovr = vsapi->propGetData(in, "ovr", 0, &err);
+    if (err)
+        ovr = "";
+
+    const char *ovr_s = vsapi->propGetData(in, "ovr_s", 0, &err);
+    if (err)
+        ovr_s = "";
+
+    const char *input = vsapi->propGetData(in, "input", 0, &err);
+    if (err)
+        input = "";
+
+    int slow = int64ToIntS(vsapi->propGetInt(in, "slow", 0, &err));
+    if (err)
+        slow = 1;
+
+    bool mChroma = !!vsapi->propGetInt(in, "mChroma", 0, &err);
+    if (err)
+        mChroma = true;
+
+    int cNum = int64ToIntS(vsapi->propGetInt(in, "cNum", 0, &err));
+    if (err)
+        cNum = 15;
+
+    int cthresh = int64ToIntS(vsapi->propGetInt(in, "cthresh", 0, &err));
+    if (err)
+        cthresh = 9;
+
+    int MI = int64ToIntS(vsapi->propGetInt(in, "MI", 0, &err));
+    if (err)
+        MI = 80;
+
+    bool chroma = !!vsapi->propGetInt(in, "chroma", 0, &err);
+    if (err)
+        chroma = false;
+
+    int blockx = int64ToIntS(vsapi->propGetInt(in, "blockx", 0, &err));
+    if (err)
+        blockx = 16;
+
+    int blocky = int64ToIntS(vsapi->propGetInt(in, "blocky", 0, &err));
+    if (err)
+        blocky = 16;
+
+    int y0 = int64ToIntS(vsapi->propGetInt(in, "y0", 0, &err));
+    if (err)
+        y0 = 0;
+
+    int y1 = int64ToIntS(vsapi->propGetInt(in, "y1", 0, &err));
+    if (err)
+        y1 = 0;
+
+    const char *d2v = vsapi->propGetData(in, "d2v", 0, &err);
+    if (err)
+        d2v = "";
+
+    int ovrDefault = int64ToIntS(vsapi->propGetInt(in, "ovrDefault", 0, &err));
+    if (err)
+        ovrDefault = 0;
+
+    int flags = int64ToIntS(vsapi->propGetInt(in, "flags", 0, &err));
+    if (err)
+        flags = 4;
+
+    double scthresh = vsapi->propGetFloat(in, "scthresh", 0, &err);
+    if (err)
+        scthresh = 12.0;
+
+    int micmatching = int64ToIntS(vsapi->propGetInt(in, "micmatching", 0, &err));
+    if (err)
+        micmatching = 1;
+
+    const char *trimIn = vsapi->propGetData(in, "trimIn", 0, &err);
+    if (err)
+        trimIn = "";
+
+    int metric = int64ToIntS(vsapi->propGetInt(in, "metric", 0, &err));
+    if (err)
+        metric = 0;
+
+    bool batch = !!vsapi->propGetInt(in, "batch", 0, &err);
+    if (err)
+        batch = false;
+
+    bool ubsco = !!vsapi->propGetInt(in, "ubsco", 0, &err);
+    if (err)
+        ubsco = true;
+
+    bool mmsco = !!vsapi->propGetInt(in, "mmsco", 0, &err);
+    if (err)
+        mmsco = true;
+
+    int opt = int64ToIntS(vsapi->propGetInt(in, "opt", 0, &err));
+    if (err)
+        opt = 4;
+
+    VSNodeRef *clip = vsapi->propGetNode(in, "clip", 0, nullptr);
+
+    if (analysis < 0 || analysis > 1) {
+        vsapi->setError(out, "TFMCombedMask: analysis must be set to 0 or 1!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (cthresh < 0 || cthresh > 255) {
+        vsapi->setError(out, "TFMCombedMask: cthresh must be between 0 and 255!");
+        vsapi->freeNode(clip);
+        return;
+    }
+
+    if (analysis == 1) {
+        if (ovr[0] && ovr_s[0]) {
+            vsapi->setError(out, "TFMCombedMask: only one of ovr and ovr_s can be set!");
+            vsapi->freeNode(clip);
+            return;
+        }
+
+        TFM *tfm_data;
+
+        try {
+            tfm_data = new TFM(clip, order, field, mode, PP, ovr, ovr_s, input, "", "", false, false, slow, mChroma, cNum, cthresh,
+                           MI, chroma, blockx, blocky, y0, y1, d2v, ovrDefault, flags, scthresh, 0, micmatching, trimIn, false,
+                           metric, batch, ubsco, mmsco, opt, true, vsapi, core);
+        } catch (const TIVTCError& e) {
+            setTFMCombedMaskError(out, e.what(), vsapi);
+            vsapi->freeNode(clip);
+            return;
+        }
+
+        int filter_mode = fmParallelRequests;
+        int filter_flags = 0;
+        if (mode == 7) {
+            filter_mode = fmSerial;
+            filter_flags = nfMakeLinear;
+        }
+        vsapi->createFilter(in, out, "TFMCombedMask", tfmInit, tfmGetFrame, tfmFree, filter_mode, filter_flags, tfm_data, core);
+        return;
+    }
+
+    const VSVideoInfo *vi = vsapi->getVideoInfo(clip);
+    if (!vi->format || vi->width == 0 || vi->height == 0) {
+        vsapi->setError(out, "TFMCombedMask: the input clip must have constant format and dimensions.");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (vi->format->bitsPerSample > 16) {
+        vsapi->setError(out, "TFMCombedMask: only 8-16 bit formats supported!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (vi->format->sampleType != stInteger) {
+        vsapi->setError(out, "TFMCombedMask: only integer formats supported!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (vi->format->colorFamily != cmYUV) {
+        vsapi->setError(out, "TFMCombedMask: YUV data only!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (vi->height & 1 || vi->width & 1) {
+        vsapi->setError(out, "TFMCombedMask: height and width must be divisible by 2!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (vi->height < 6 || vi->width < 64) {
+        vsapi->setError(out, "TFMCombedMask: frame dimensions too small!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (metric != 0 && metric != 1) {
+        vsapi->setError(out, "TFMCombedMask: metric must be set to 0 or 1!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (opt < 0 || opt > 4) {
+        vsapi->setError(out, "TFMCombedMask: opt must be set to 0, 1, 2, 3, or 4!");
+        vsapi->freeNode(clip);
+        return;
+    }
+
+    TFMCombedMaskData *data = new TFMCombedMaskData();
+    data->vsapi = vsapi;
+    data->child = clip;
+    data->vi = vi;
+    data->viOut = *vi;
+    data->maskFormat = vsapi->registerFormat(cmGray, stInteger, 8, 0, 0, core);
+    data->viOut.format = data->maskFormat;
+    data->cpuFlags = *getCPUFeatures();
+    if (opt == 0)
+        memset(&data->cpuFlags, 0, sizeof(data->cpuFlags));
+    data->cthresh = cthresh;
+    data->chroma = chroma;
+    data->metric = metric;
+
+    vsapi->createFilter(in, out, "TFMCombedMask", tfmCombedMaskInit, tfmCombedMaskGetFrame, tfmCombedMaskFree, fmParallelRequests, 0, data, core);
 }
 
 
@@ -652,6 +948,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
                  "mode:int:opt;"
                  "PP:int:opt;"
                  "ovr:data:opt;"
+                 "ovr_s:data:opt;"
                  "input:data:opt;"
                  "output:data:opt;"
                  "outputC:data:opt;"
@@ -683,6 +980,39 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
                  "mmsco:int:opt;"
                  "opt:int:opt;"
                  , tfmCreate, nullptr, plugin);
+
+    registerFunc("TFMCombedMask",
+                 "clip:clip;"
+                 "analysis:int:opt;"
+                 "order:int:opt;"
+                 "field:int:opt;"
+                 "mode:int:opt;"
+                 "PP:int:opt;"
+                 "ovr:data:opt;"
+                 "ovr_s:data:opt;"
+                 "input:data:opt;"
+                 "slow:int:opt;"
+                 "mChroma:int:opt;"
+                 "cNum:int:opt;"
+                 "cthresh:int:opt;"
+                 "MI:int:opt;"
+                 "chroma:int:opt;"
+                 "blockx:int:opt;"
+                 "blocky:int:opt;"
+                 "y0:int:opt;"
+                 "y1:int:opt;"
+                 "d2v:data:opt;"
+                 "ovrDefault:int:opt;"
+                 "flags:int:opt;"
+                 "scthresh:float:opt;"
+                 "micmatching:int:opt;"
+                 "trimIn:data:opt;"
+                 "metric:int:opt;"
+                 "batch:int:opt;"
+                 "ubsco:int:opt;"
+                 "mmsco:int:opt;"
+                 "opt:int:opt;"
+                 , tfmCombedMaskCreate, nullptr, plugin);
 
     registerFunc("TDecimate",
                  "clip:clip;"

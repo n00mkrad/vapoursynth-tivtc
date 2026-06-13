@@ -1824,10 +1824,10 @@ void maskClip2_SSE2(const uint8_t *srcp, const uint8_t *dntp,
 }
 
 
-TFMPP::TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, bool _display,
+TFMPP::TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, const char* _ovr_s, bool _display,
   VSNodeRef *_clip2, bool _usehints, int _opt, const VSAPI *_vsapi, VSCore *core)
     : vsapi(_vsapi), child(_child),
-  PP(_PP), mthresh(_mthresh), ovr(_ovr), display(_display), clip2(_clip2),
+  PP(_PP), mthresh(_mthresh), ovr(_ovr), ovr_s(_ovr_s), display(_display), clip2(_clip2),
   usehints(_usehints), opt(_opt)
 {
     vi = vsapi->getVideoInfo(child);
@@ -1836,7 +1836,6 @@ TFMPP::TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, bool _d
 
   int w, i, z, b, q, countOvrS;
   char linein[1024], *linep, *linet;
-  std::unique_ptr<FILE, decltype (&fclose)> f(nullptr, nullptr);
 
   cpuFlags = *getCPUFeatures();
   if (opt == 0) memset(&cpuFlags, 0, sizeof(cpuFlags));
@@ -1878,12 +1877,14 @@ TFMPP::TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, bool _d
   PP_origSaved = PP;
   mthresh_origSaved = mthresh;
   i = 0;
-  if (ovr.size())
+  if (ovr.size() || ovr_s.size())
   {
-    if ((f = decltype(f) (tivtc_fopen(ovr.c_str(), "r"), &fclose)) != nullptr)
+    const bool ovrFromString = ovr_s.size() != 0;
+    TIVTCLineReader ovrReader(ovrFromString ? ovr_s.c_str() : ovr.c_str(), ovrFromString);
+    if (ovrReader.opened())
     {
       countOvrS = 0;
-      while (fgets(linein, 1024, f.get()) != nullptr)
+      while (ovrReader.getLine(linein, 1024) != nullptr)
       {
         if (linein[0] == 0 || linein[0] == '\n' || linein[0] == '\r' || linein[0] == ';' || linein[0] == '#')
           continue;
@@ -1896,9 +1897,10 @@ TFMPP::TFMPP(VSNodeRef *_child, int _PP, int _mthresh, const char* _ovr, bool _d
       ++countOvrS;
       countOvrS *= 4;
       setArray.resize(countOvrS, 0xffffffff);
-      if ((f = decltype(f) (tivtc_fopen(ovr.c_str(), "r"), &fclose)) != nullptr)
+      ovrReader.reset();
+      if (ovrReader.opened())
       {
-        while (fgets(linein, 1024, f.get()) != nullptr)
+        while (ovrReader.getLine(linein, 1024) != nullptr)
         {
           if (linein[0] == 0 || linein[0] == '\n' || linein[0] == '\r' || linein[0] == ';' || linein[0] == '#')
             continue;

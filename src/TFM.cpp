@@ -663,7 +663,7 @@ void TFM::writeDisplay(VSFrameRef *dst, int n, int fmatch, int combed, bool over
     if (micout == 1 && mics[0] != -20 && mics[1] != -20 && mics[2] != -20 && micmatching == 0)
     {
       snprintf(buf, SZ, "MICS:  p=%d c=%d n=%d\n", mics[0], mics[1], mics[2]);
-      text + buf;
+      text += buf;
     }
     else if ((micout == 2 && mics[0] != -20 && mics[1] != -20 && mics[2] != -20 &&
       mics[3] != -20 && mics[4] != -20) || micmatching > 0)
@@ -855,6 +855,26 @@ int TFM::compareFields(const VSFrameRef *prv, const VSFrameRef *src, const VSFra
 }
 
 
+bool TFM::useMatchBandRow(int y, int y0a, int y1a, bool noBandExclusion) const
+{
+  if (noBandExclusion)
+    return true;
+  return yInvert ? (y >= y0a && y <= y1a) : (y < y0a || y > y1a);
+}
+
+
+void TFM::getMatchXRange(int plane, int &startx, int &stopx) const
+{
+  if (x0 == x1)
+    return;
+  const int xsubsampling = plane ? vi->format->subSamplingW : 0;
+  const int x0a = x0 >> xsubsampling;
+  const int x1a = x1 >> xsubsampling;
+  if (x0a > startx) startx = x0a;
+  if (x1a + 1 < stopx) stopx = x1a + 1;
+}
+
+
 template<typename pixel_t>
 int TFM::compareFields_core(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1,
   int match2, int &norm1, int &norm2, int &mtn1, int &mtn2, int n)
@@ -893,8 +913,9 @@ int TFM::compareFields_core(const VSFrameRef *prv, const VSFrameRef *src, const 
     const pixel_t* nxtp = reinterpret_cast<const pixel_t*>(vsapi->getReadPtr(nxt, plane));
     const int nxt_pitch = vsapi->getStride(nxt, plane) / sizeof(pixel_t);
 
-    const int startx = 8 >> (plane ? vi->format->subSamplingW : 0);
-    const int stopx = Width - startx;
+    int startx = 8 >> (plane ? vi->format->subSamplingW : 0);
+    int stopx = Width - startx;
+    getMatchXRange(plane, startx, stopx);
 
     const pixel_t* prvpf = nullptr, * curf = nullptr, * nxtpf = nullptr;
     int prvf_pitch = 0, curf_pitch, nxtf_pitch = 0;
@@ -1007,7 +1028,7 @@ int TFM::compareFields_core(const VSFrameRef *prv, const VSFrameRef *src, const 
 
     // TFM 874
     for (int y = 2; y < Height - 2; y += 2) {
-      if ((y < y0a) || noBandExclusion || (y > y1a))  // exclusion area check
+      if (useMatchBandRow(y, y0a, y1a, noBandExclusion))
       {
         for (int x = startx; x < stopx; x += incl)
         {
@@ -1259,8 +1280,9 @@ int TFM::compareFieldsSlow_core(const VSFrameRef *prv, const VSFrameRef *src, co
     const pixel_t* nxtp = reinterpret_cast<const pixel_t*>(vsapi->getReadPtr(nxt, plane));
     const int nxt_pitch = vsapi->getStride(nxt, plane) / sizeof(pixel_t);
 
-    const int startx = 8 >> (plane ? vi->format->subSamplingW : 0);
-    const int stopx = Width - startx;
+    int startx = 8 >> (plane ? vi->format->subSamplingW : 0);
+    int stopx = Width - startx;
+    getMatchXRange(plane, startx, stopx);
 
     const pixel_t* prvpf = nullptr, * curf = nullptr, * nxtpf = nullptr;
     int prvf_pitch = 0, curf_pitch, nxtf_pitch = 0;
@@ -1380,7 +1402,7 @@ int TFM::compareFieldsSlow_core(const VSFrameRef *prv, const VSFrameRef *src, co
     // TFM 1144
     // almost the same as in compareFields and buildDiffMapPlane2
     for (int y = 2; y < Height - 2; y += 2) {
-      if ((y < y0a) || noBandExclusion || (y > y1a)) // exclusion area check
+      if (useMatchBandRow(y, y0a, y1a, noBandExclusion))
       {
         for (int x = startx; x < stopx; x += incl)
         {
@@ -1648,8 +1670,9 @@ int TFM::compareFieldsSlow2_core(const VSFrameRef *prv, const VSFrameRef *src, c
     const pixel_t* nxtp = reinterpret_cast<const pixel_t*>(vsapi->getReadPtr(nxt, plane));
     const int nxt_pitch = vsapi->getStride(nxt, plane) / sizeof(pixel_t);
 
-    const int startx = 8 >> (plane ? vi->format->subSamplingW : 0);
-    const int stopx = Width - startx;
+    int startx = 8 >> (plane ? vi->format->subSamplingW : 0);
+    int stopx = Width - startx;
+    getMatchXRange(plane, startx, stopx);
 
     const pixel_t* prvpf = nullptr, * curf = nullptr, * nxtpf = nullptr;
     int prvf_pitch = 0, curf_pitch, nxtf_pitch = 0;
@@ -1775,7 +1798,7 @@ int TFM::compareFieldsSlow2_core(const VSFrameRef *prv, const VSFrameRef *src, c
     // TFM 1436
     // almost the same as in TFM 1144
       for (int y = 2; y < Height - 2; y += 2) {
-        if ((y < y0a) || noBandExclusion || (y > y1a))
+        if (useMatchBandRow(y, y0a, y1a, noBandExclusion))
         {
           for (int x = startx; x < stopx; x += incl)
           {
@@ -1861,7 +1884,7 @@ int TFM::compareFieldsSlow2_core(const VSFrameRef *prv, const VSFrameRef *src, c
       // differences are after eax&56 block, see later
 
       for (int y = 2; y < Height - 2; y += 2) {
-        if ((y < y0a) || noBandExclusion || (y > y1a))
+        if (useMatchBandRow(y, y0a, y1a, noBandExclusion))
         {
           for (int x = startx; x < stopx; x += incl)
           {
@@ -2765,14 +2788,14 @@ template void TFM::buildABSDiffMask<uint16_t>(const uint8_t* prvp, const uint8_t
 TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const char* _ovr,
   const char* _ovr_s, const char* _input, const char* _output, const char * _outputC, bool _debug, bool _display,
   int _slow, bool _mChroma, int _cNum, int _cthresh, int _MI, bool _chroma, int _blockx,
-  int _blocky, int _y0, int _y1, const char* _d2v, int _ovrDefault, int _flags, double _scthresh,
+  int _blocky, int _x0, int _x1, int _y0, int _y1, bool _yInvert, const char* _d2v, int _ovrDefault, int _flags, double _scthresh,
   int _micout, int _micmatching, const char* _trimIn, bool _usehints, int _metric, bool _batch,
   bool _ubsco, bool _mmsco, int _opt, bool _maskOutput, const VSAPI *_vsapi, VSCore *core)
     : vsapi(_vsapi), child(_child),
   order(_order), field(_field), mode(_mode), PP(_PP), ovr(_ovr), ovr_s(_ovr_s), input(_input), output(_output),
   outputC(_outputC), debug(_debug), display(_display), slow(_slow), mChroma(_mChroma), cNum(_cNum),
-  cthresh(_cthresh), MI(_MI), chroma(_chroma), blockx(_blockx), blocky(_blocky), y0(_y0),
-  y1(_y1), d2v(_d2v), ovrDefault(_ovrDefault), flags(_flags), scthresh(_scthresh), micout(_micout),
+  cthresh(_cthresh), MI(_MI), chroma(_chroma), blockx(_blockx), blocky(_blocky), x0(_x0), x1(_x1), y0(_y0),
+  y1(_y1), yInvert(_yInvert), d2v(_d2v), ovrDefault(_ovrDefault), flags(_flags), scthresh(_scthresh), micout(_micout),
   micmatching(_micmatching), trimIn(_trimIn), usehints(_usehints), metric(_metric),
   batch(_batch), ubsco(_ubsco), mmsco(_mmsco), opt(_opt), maskOutput(_maskOutput), maskFormat(nullptr), cArray(nullptr, nullptr), tbuffer(nullptr, nullptr),
   map(nullptr, nullptr), cmask(nullptr, nullptr)
@@ -2822,6 +2845,10 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
   if (blocky != 4 && blocky != 8 && blocky != 16 && blocky != 32 && blocky != 64 &&
     blocky != 128 && blocky != 256 && blocky != 512 && blocky != 1024 && blocky != 2048)
     throw TIVTCError("TFM:  illegal blocky size!");
+  if (x0 != x1 && (x0 < 0 || x1 < 0 || x0 >= x1 || x1 >= vi->width))
+    throw TIVTCError("TFM:  bad x0 and x1 analysis window values!");
+  if (x0 != x1 && (x1 < 8 || x0 >= vi->width - 8))
+    throw TIVTCError("TFM:  x0 and x1 analysis window does not overlap the active area!");
   if (y0 != y1 && (y0 < 0 || y1 < 0 || y0 > y1 || y1 > vi->height || y0 > vi->height))
     throw TIVTCError("TFM:  bad y0 and y1 exclusion band values!");
   if (ovrDefault < 0 || ovrDefault > 2)

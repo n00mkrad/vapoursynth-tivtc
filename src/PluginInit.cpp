@@ -285,6 +285,14 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
     if (err)
         blocky = 16;
 
+    int x0 = int64ToIntS(vsapi->propGetInt(in, "x0", 0, &err));
+    if (err)
+        x0 = 0;
+
+    int x1 = int64ToIntS(vsapi->propGetInt(in, "x1", 0, &err));
+    if (err)
+        x1 = 0;
+
     int y0 = int64ToIntS(vsapi->propGetInt(in, "y0", 0, &err));
     if (err)
         y0 = 0;
@@ -292,6 +300,10 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
     int y1 = int64ToIntS(vsapi->propGetInt(in, "y1", 0, &err));
     if (err)
         y1 = 0;
+
+    bool yInvert = !!vsapi->propGetInt(in, "y_invert", 0, &err);
+    if (err)
+        yInvert = false;
 
     int mthresh = int64ToIntS(vsapi->propGetInt(in, "mthresh", 0, &err));
     if (err)
@@ -356,7 +368,7 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
 
     try {
         tfm_data = new TFM(clip, order, field, mode, PP, ovr, ovr_s, input, output, outputC, debug, display, slow, mChroma, cNum, cthresh,
-                       MI, chroma, blockx, blocky, y0, y1, d2v, ovrDefault, flags, scthresh, micout, micmatching, trimIn, hint,
+                       MI, chroma, blockx, blocky, x0, x1, y0, y1, yInvert, d2v, ovrDefault, flags, scthresh, micout, micmatching, trimIn, hint,
                        metric, batch, ubsco, mmsco, opt, false, vsapi, core);
     } catch (const TIVTCError& e) {
         vsapi->setError(out, e.what());
@@ -458,9 +470,9 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
 
     int err;
 
-    int analysis = int64ToIntS(vsapi->propGetInt(in, "analysis", 0, &err));
+    bool pre_tfm = !!vsapi->propGetInt(in, "pre_tfm", 0, &err);
     if (err)
-        analysis = 0;
+        pre_tfm = false;
 
     int order = int64ToIntS(vsapi->propGetInt(in, "order", 0, &err));
     if (err)
@@ -522,6 +534,14 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
     if (err)
         blocky = 16;
 
+    int x0 = int64ToIntS(vsapi->propGetInt(in, "x0", 0, &err));
+    if (err)
+        x0 = 0;
+
+    int x1 = int64ToIntS(vsapi->propGetInt(in, "x1", 0, &err));
+    if (err)
+        x1 = 0;
+
     int y0 = int64ToIntS(vsapi->propGetInt(in, "y0", 0, &err));
     if (err)
         y0 = 0;
@@ -576,18 +596,13 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
 
     VSNodeRef *clip = vsapi->propGetNode(in, "clip", 0, nullptr);
 
-    if (analysis < 0 || analysis > 1) {
-        vsapi->setError(out, "TFMCombedMask: analysis must be set to 0 or 1!");
-        vsapi->freeNode(clip);
-        return;
-    }
     if (cthresh < 0 || cthresh > 255) {
         vsapi->setError(out, "TFMCombedMask: cthresh must be between 0 and 255!");
         vsapi->freeNode(clip);
         return;
     }
 
-    if (analysis == 1) {
+    if (!pre_tfm) {
         if (ovr[0] && ovr_s[0]) {
             vsapi->setError(out, "TFMCombedMask: only one of ovr and ovr_s can be set!");
             vsapi->freeNode(clip);
@@ -598,7 +613,7 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
 
         try {
             tfm_data = new TFM(clip, order, field, mode, PP, ovr, ovr_s, input, "", "", false, false, slow, mChroma, cNum, cthresh,
-                           MI, chroma, blockx, blocky, y0, y1, d2v, ovrDefault, flags, scthresh, 0, micmatching, trimIn, false,
+                           MI, chroma, blockx, blocky, x0, x1, y0, y1, false, d2v, ovrDefault, flags, scthresh, 0, micmatching, trimIn, false,
                            metric, batch, ubsco, mmsco, opt, true, vsapi, core);
         } catch (const TIVTCError& e) {
             setTFMCombedMaskError(out, e.what(), vsapi);
@@ -962,8 +977,11 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
                  "chroma:int:opt;"
                  "blockx:int:opt;"
                  "blocky:int:opt;"
+                 "x0:int:opt;"
+                 "x1:int:opt;"
                  "y0:int:opt;"
                  "y1:int:opt;"
+                 "y_invert:int:opt;"
                  "mthresh:int:opt;"
                  "clip2:clip:opt;"
                  "d2v:data:opt;"
@@ -983,7 +1001,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
 
     registerFunc("TFMCombedMask",
                  "clip:clip;"
-                 "analysis:int:opt;"
+                 "pre_tfm:int:opt;"
                  "order:int:opt;"
                  "field:int:opt;"
                  "mode:int:opt;"
@@ -999,6 +1017,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
                  "chroma:int:opt;"
                  "blockx:int:opt;"
                  "blocky:int:opt;"
+                 "x0:int:opt;"
+                 "x1:int:opt;"
                  "y0:int:opt;"
                  "y1:int:opt;"
                  "d2v:data:opt;"

@@ -90,7 +90,9 @@ private:
   int MI; // modified in GetFrame
   bool chroma;
   int blockx, blocky;
+  int x0, x1; // match analysis window
   int y0, y1; // band exclusion
+  bool yInvert;
   std::string d2v;
   int ovrDefault;
   int flags;
@@ -153,6 +155,8 @@ private:
 
   int compareFields(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1,
     int match2, int &norm1, int &norm2, int &mtn1, int &mtn2, int n);
+  bool useMatchBandRow(int y, int y0a, int y1a, bool noBandExclusion) const;
+  void getMatchXRange(int plane, int &startx, int &stopx) const;
   template<typename pixel_t>
   int compareFields_core(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1,
     int match2, int& norm1, int& norm2, int& mtn1, int& mtn2, int n);
@@ -237,7 +241,7 @@ public:
   TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const char* _ovr, const char* _ovr_s,
     const char* _input, const char* _output, const char * _outputC, bool _debug, bool _display, int _slow,
     bool _mChroma, int _cNum, int _cthresh, int _MI, bool _chroma, int _blockx, int _blocky,
-    int _y0, int _y1, const char* _d2v, int _ovrDefault, int _flags, double _scthresh, int _micout,
+    int _x0, int _x1, int _y0, int _y1, bool _yInvert, const char* _d2v, int _ovrDefault, int _flags, double _scthresh, int _micout,
     int _micmatching, const char* _trimIn, bool _usehints, int _metric, bool _batch, bool _ubsco,
     bool _mmsco, int _opt, bool _maskOutput, const VSAPI *_vsapi, VSCore *core);
   ~TFM();

@@ -48,8 +48,8 @@
 template<int planarType>
 void FillCombedPlanarUpdateCmaskByUV(VSFrameRef* cmask, const VSAPI *vsapi);
 
-VSFrameRef *createCombedMaskFrame(const VSVideoInfo *vi, const VSFrameRef *src, int cthresh, bool chroma, int metric,
-  const CPUFeatures *cpuFlags, const VSFormat *maskFormat, const VSAPI *vsapi, VSCore *core);
+VSFrameRef *createCombedMaskFrame(const VSVideoInfo *vi, const VSFrameRef *src, int cthresh, int cthresh2, double hthresh,
+  bool chroma, int metric, const CPUFeatures *cpuFlags, const VSFormat *maskFormat, const VSAPI *vsapi, VSCore *core);
 
 template<typename pixel_t>
 void checkCombedPlanarAnalyze_core(const VSVideoInfo *vi, int cthresh, bool chroma, const CPUFeatures *cpuFlags, int metric,
@@ -87,6 +87,8 @@ private:
   bool mChroma;
   int cNum;
   int cthresh;
+  int cthresh2;
+  double hthresh;
   int MI; // modified in GetFrame
   bool chroma;
   int blockx, blocky;
@@ -103,9 +105,28 @@ private:
   bool metric;
   bool batch, ubsco, mmsco;
   int opt;
+  int blockmatch;
+  bool blockUnknowns;
+  int blockUnknownThresholdAbs;
+  double blockUnknownThresholdRel;
   bool maskOutput;
   const VSFormat *maskFormat;
   VSVideoInfo maskVi;
+
+  struct BlockFieldMetrics {
+    uint64_t pc;
+    uint64_t nc;
+    uint64_t pm;
+    uint64_t nm;
+    uint64_t pml;
+    uint64_t nml;
+    uint64_t samples;
+  };
+
+  struct BlockMatchDecision {
+    int match;
+    bool reliable;
+  };
 
   int PP_origSaved, MI_origSaved;
   int order_origSaved, field_origSaved, mode_origSaved;
@@ -169,6 +190,17 @@ private:
   template<typename pixel_t>
   int compareFieldsSlow2_core(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1,
     int match2, int& norm1, int& norm2, int& mtn1, int& mtn2, int n);
+
+  BlockMatchDecision selectMatchFromMetrics(int match1, int match2, int norm1, int norm2, int mtn1, int mtn2, int slowMode, uint64_t samples) const;
+  void calculateBlockMatches(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, std::vector<uint8_t> &matches, std::vector<uint8_t> &known);
+  void compareBlockMatchesAgainstCandidate(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int candidate,
+    std::vector<uint8_t> &matches, std::vector<uint8_t> &known);
+  int compareFieldsBlock(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1, int match2,
+    std::vector<BlockFieldMetrics> &metrics);
+  template<typename pixel_t>
+  int compareFieldsBlock_core(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1, int match2,
+    std::vector<BlockFieldMetrics> &metrics);
+  void putBlockMatchProperties(VSFrameRef *dst, const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, VSCore *core);
 
   void createWeaveFrame(VSFrameRef *dst, const VSFrameRef *prv, const VSFrameRef *src,
     const VSFrameRef *nxt, int match, int &cfrm) const;
@@ -243,7 +275,8 @@ public:
     bool _mChroma, int _cNum, int _cthresh, int _MI, bool _chroma, int _blockx, int _blocky,
     int _x0, int _x1, int _y0, int _y1, bool _yInvert, const char* _d2v, int _ovrDefault, int _flags, double _scthresh, int _micout,
     int _micmatching, const char* _trimIn, bool _usehints, int _metric, bool _batch, bool _ubsco,
-    bool _mmsco, int _opt, bool _maskOutput, const VSAPI *_vsapi, VSCore *core);
+    bool _mmsco, int _opt, int _blockmatch, int _blockUnknowns, int _blockUnknownThresholdAbs, double _blockUnknownThresholdRel,
+    bool _maskOutput, const VSAPI *_vsapi, VSCore *core, int _cthresh2 = 9, double _hthresh = 1.5);
   ~TFM();
 
 //  int __stdcall SetCacheHints(int cachehints, int frame_range) override {

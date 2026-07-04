@@ -74,6 +74,8 @@ struct TFMCombedMaskData {
     const VSFormat *maskFormat;
     CPUFeatures cpuFlags;
     int cthresh;
+    int cthresh2;
+    double hthresh;
     bool chroma;
     int metric;
 };
@@ -114,7 +116,7 @@ static const VSFrameRef *VS_CC tfmCombedMaskGetFrame(int n, int activationReason
     }
 
     const VSFrameRef *src = d->vsapi->getFrameFilter(n, d->child, frameCtx);
-    VSFrameRef *dst = createCombedMaskFrame(d->vi, src, d->cthresh, d->chroma, d->metric, &d->cpuFlags, d->maskFormat, d->vsapi, core);
+    VSFrameRef *dst = createCombedMaskFrame(d->vi, src, d->cthresh, d->cthresh2, d->hthresh, d->chroma, d->metric, &d->cpuFlags, d->maskFormat, d->vsapi, core);
     d->vsapi->freeFrame(src);
     return dst;
 }
@@ -361,6 +363,21 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
     if (err)
         opt = 4;
 
+    int blockmatch = int64ToIntS(vsapi->propGetInt(in, "blockmatch", 0, &err));
+    if (err)
+        blockmatch = 0;
+
+    int blockUnknowns = int64ToIntS(vsapi->propGetInt(in, "block_unknowns", 0, &err));
+    if (err)
+        blockUnknowns = 0;
+
+    int thAbs = int64ToIntS(vsapi->propGetInt(in, "th_abs", 0, &err));
+    if (err)
+        thAbs = 4;
+
+    double thRel = vsapi->propGetFloat(in, "th_rel", 0, &err);
+    if (err)
+        thRel = 1.25;
 
     VSNodeRef *clip = vsapi->propGetNode(in, "clip", 0, nullptr);
 
@@ -369,7 +386,7 @@ static void VS_CC tfmCreate(const VSMap *in, VSMap *out, void *userData, VSCore 
     try {
         tfm_data = new TFM(clip, order, field, mode, PP, ovr, ovr_s, input, output, outputC, debug, display, slow, mChroma, cNum, cthresh,
                        MI, chroma, blockx, blocky, x0, x1, y0, y1, yInvert, d2v, ovrDefault, flags, scthresh, micout, micmatching, trimIn, hint,
-                       metric, batch, ubsco, mmsco, opt, false, vsapi, core);
+                       metric, batch, ubsco, mmsco, opt, blockmatch, blockUnknowns, thAbs, thRel, false, vsapi, core);
     } catch (const TIVTCError& e) {
         vsapi->setError(out, e.what());
 
@@ -518,6 +535,14 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
     if (err)
         cthresh = 9;
 
+    int cthresh2 = int64ToIntS(vsapi->propGetInt(in, "cthresh2", 0, &err));
+    if (err)
+        cthresh2 = cthresh == 0 ? 255 : 9;
+
+    double hthresh = vsapi->propGetFloat(in, "hthresh", 0, &err);
+    if (err)
+        hthresh = 1.5;
+
     int MI = int64ToIntS(vsapi->propGetInt(in, "MI", 0, &err));
     if (err)
         MI = 80;
@@ -601,6 +626,16 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
         vsapi->freeNode(clip);
         return;
     }
+    if (cthresh2 < 0 || cthresh2 > 255) {
+        vsapi->setError(out, "TFMCombedMask: cthresh2 must be between 0 and 255!");
+        vsapi->freeNode(clip);
+        return;
+    }
+    if (!(hthresh >= 0.0)) {
+        vsapi->setError(out, "TFMCombedMask: hthresh must be greater than or equal to 0.0!");
+        vsapi->freeNode(clip);
+        return;
+    }
 
     if (!pre_tfm) {
         if (ovr[0] && ovr_s[0]) {
@@ -614,7 +649,7 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
         try {
             tfm_data = new TFM(clip, order, field, mode, PP, ovr, ovr_s, input, "", "", false, false, slow, mChroma, cNum, cthresh,
                            MI, chroma, blockx, blocky, x0, x1, y0, y1, false, d2v, ovrDefault, flags, scthresh, 0, micmatching, trimIn, false,
-                           metric, batch, ubsco, mmsco, opt, true, vsapi, core);
+                           metric, batch, ubsco, mmsco, opt, 0, 0, 4, 1.25, true, vsapi, core, cthresh2, hthresh);
         } catch (const TIVTCError& e) {
             setTFMCombedMaskError(out, e.what(), vsapi);
             vsapi->freeNode(clip);
@@ -684,6 +719,8 @@ static void VS_CC tfmCombedMaskCreate(const VSMap *in, VSMap *out, void *userDat
     if (opt == 0)
         memset(&data->cpuFlags, 0, sizeof(data->cpuFlags));
     data->cthresh = cthresh;
+    data->cthresh2 = cthresh2;
+    data->hthresh = hthresh;
     data->chroma = chroma;
     data->metric = metric;
 
@@ -997,6 +1034,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
                  "ubsco:int:opt;"
                  "mmsco:int:opt;"
                  "opt:int:opt;"
+                 "blockmatch:int:opt;"
+                 "block_unknowns:int:opt;"
+                 "th_abs:int:opt;"
+                 "th_rel:float:opt;"
                  , tfmCreate, nullptr, plugin);
 
     registerFunc("TFMCombedMask",
@@ -1013,6 +1054,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegiste
                  "mChroma:int:opt;"
                  "cNum:int:opt;"
                  "cthresh:int:opt;"
+                 "cthresh2:int:opt;"
+                 "hthresh:float:opt;"
                  "MI:int:opt;"
                  "chroma:int:opt;"
                  "blockx:int:opt;"

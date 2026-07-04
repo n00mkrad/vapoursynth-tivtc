@@ -68,9 +68,6 @@ void check_combing_uint16_SSE4(const uint16_t* srcp, uint8_t* dstp, int width, i
 void check_combing_SSE2_Metric1(const uint8_t *srcp, uint8_t *dstp,
   int width, int height, int src_pitch, int dst_pitch, int cthreshsq);
   
-void check_combing_SSE2_Luma_Metric1(const uint8_t *srcp, uint8_t *dstp,
-  int width, int height, int src_pitch, int dst_pitch, int cthreshsq);
-
 template<typename pixel_t>
 void buildABSDiffMask_SSE2(const uint8_t *prvp, const uint8_t *nxtp,
   uint8_t *dstp, int prv_pitch, int nxt_pitch, int dst_pitch, int width, int height);

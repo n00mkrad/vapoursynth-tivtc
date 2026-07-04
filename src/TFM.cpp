@@ -23,6 +23,7 @@
 **   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
+#include <algorithm>
 #include <cstring>
 
 #include "TFM.h"
@@ -45,7 +46,7 @@ const VSFrameRef *TFM::returnCombedMask(VSFrameRef *dst, const VSFrameRef *prv, 
   const VSFrameRef *nxt, VSFrameRef *tmp, int n, int fmatch, int combed, bool d2vfilm, VSCore *core)
 {
   (void)d2vfilm;
-  VSFrameRef *mask = createCombedMaskFrame(vi, dst, cthresh, chroma, metric, &cpuFlags, maskFormat, vsapi, core);
+  VSFrameRef *mask = createCombedMaskFrame(vi, dst, cthresh, cthresh2, hthresh, chroma, metric, &cpuFlags, maskFormat, vsapi, core);
   lastMatch.frame = n;
   lastMatch.match = fmatch;
   lastMatch.field = field;
@@ -185,6 +186,7 @@ const VSFrameRef *TFM::GetFrame(int n, int activationReason, VSFrameContext *fra
 //        OutputDebugString(buf);
 //      }
 //    }
+    if (blockmatch) putBlockMatchProperties(dst, prv, src, nxt, core);
     if (usehints || PP >= 2) putFrameProperties(dst, fmatch, combed, d2vfilm, mics);
     lastMatch.frame = n;
     lastMatch.match = fmatch;
@@ -535,6 +537,7 @@ d2vCJump:
 //      OutputDebugString(buf);
 //    }
 //  }
+  if (blockmatch) putBlockMatchProperties(dst, prv, src, nxt, core);
   if (usehints || PP >= 2) putFrameProperties(dst, fmatch, combed, d2vfilm, mics);
   lastMatch.frame = n;
   lastMatch.match = fmatch;
@@ -874,6 +877,392 @@ void TFM::getMatchXRange(int plane, int &startx, int &stopx) const
   if (x1a + 1 < stopx) stopx = x1a + 1;
 }
 
+
+TFM::BlockMatchDecision TFM::selectMatchFromMetrics(int match1, int match2, int norm1, int norm2, int mtn1, int mtn2, int slowMode, uint64_t samples) const
+{
+  if (samples == 0)
+    return { match1, false };
+  float c1 = float(std::max(norm1, norm2)) / float(std::max(std::min(norm1, norm2), 1));
+  float c2 = float(std::max(mtn1, mtn2)) / float(std::max(std::min(mtn1, mtn2), 1));
+  float mr = float(std::max(mtn1, mtn2)) / float(std::max(std::max(norm1, norm2), 1));
+  if ((slowMode >= 2 && (mtn1 >= 250 || mtn2 >= 250) && (mtn1 * 4 < mtn2 * 1 || mtn2 * 4 < mtn1 * 1)) ||
+    (slowMode >= 1 && (mtn1 >= 375 || mtn2 >= 375) && (mtn1 * 3 < mtn2 * 1 || mtn2 * 3 < mtn1 * 1)) ||
+    ((mtn1 >= 500 || mtn2 >= 500) && (mtn1 * 2 < mtn2 * 1 || mtn2 * 2 < mtn1 * 1)) ||
+    ((mtn1 >= 1000 || mtn2 >= 1000) && (mtn1 * 3 < mtn2 * 2 || mtn2 * 3 < mtn1 * 2)) ||
+    ((mtn1 >= 2000 || mtn2 >= 2000) && (mtn1 * 5 < mtn2 * 4 || mtn2 * 5 < mtn1 * 4)) ||
+    ((mtn1 >= 4000 || mtn2 >= 4000) && c2 > c1))
+  {
+    return { mtn1 > mtn2 ? match2 : match1, true };
+  }
+  else if (mr > 0.005 && std::max(mtn1, mtn2) > 150 && (mtn1 * 2 < mtn2 * 1 || mtn2 * 2 < mtn1 * 1))
+  {
+    return { mtn1 > mtn2 ? match2 : match1, true };
+  }
+  else
+  {
+    const int winner = std::max(norm1, norm2);
+    const int loser = std::min(norm1, norm2);
+    const bool reliable = norm1 != norm2 && winner - loser >= blockUnknownThresholdAbs && double(winner) >= double(loser) * blockUnknownThresholdRel;
+    return { norm1 > norm2 ? match2 : match1, reliable };
+  }
+}
+
+
+void TFM::calculateBlockMatches(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, std::vector<uint8_t> &matches, std::vector<uint8_t> &known)
+{
+  const int xblocks = (vi->width + blockx - 1) / blockx;
+  const int yblocks = (vi->height + blocky - 1) / blocky;
+  matches.assign(xblocks * yblocks, 1);
+  known.assign(xblocks * yblocks, blockUnknowns ? 0 : 1);
+  int candidates[5];
+  int count = 0;
+  auto addCandidate = [&](int match)
+  {
+    if (match < 0 || match > 4)
+      return;
+    for (int i = 0; i < count; ++i)
+      if (candidates[i] == match)
+        return;
+    candidates[count++] = match;
+  };
+  const int frstT = field^order ? 2 : 0;
+  const int scndT = (mode == 2 || mode == 6) ? (field^order ? 3 : 4) : (field^order ? 0 : 2);
+  addCandidate(frstT);
+  if (mode != 0 && mode != 7)
+    addCandidate(scndT);
+  if (mode == 3 || mode == 5 || mode == 6)
+  {
+    addCandidate(0);
+    addCandidate(2);
+    addCandidate(3);
+    addCandidate(4);
+  }
+  for (int i = 0; i < count; ++i)
+    compareBlockMatchesAgainstCandidate(prv, src, nxt, candidates[i], matches, known);
+}
+
+
+void TFM::compareBlockMatchesAgainstCandidate(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int candidate,
+  std::vector<uint8_t> &matches, std::vector<uint8_t> &known)
+{
+  const int arraysize = int(matches.size());
+  std::vector<BlockFieldMetrics> metrics(arraysize);
+  for (int current = 0; current < 5; ++current)
+  {
+    if (current == candidate)
+      continue;
+    bool needed = false;
+    for (int i = 0; i < arraysize; ++i)
+    {
+      if (matches[i] == current)
+      {
+        needed = true;
+        break;
+      }
+    }
+    if (!needed)
+      continue;
+    std::fill(metrics.begin(), metrics.end(), BlockFieldMetrics{ 0, 0, 0, 0, 0, 0, 0 });
+    const int slowMode = compareFieldsBlock(prv, src, nxt, current, candidate, metrics);
+    const int bits_per_pixel = vi->format->bitsPerSample;
+    const unsigned int Const500 = 500 << (bits_per_pixel - 8);
+    const double factor = 1.0 / (1 << (bits_per_pixel - 8));
+    for (int i = 0; i < arraysize; ++i)
+    {
+      if (matches[i] != current)
+        continue;
+      uint64_t pm = metrics[i].pm;
+      uint64_t nm = metrics[i].nm;
+      if (slowMode > 0 && pm < Const500 && nm < Const500 && (metrics[i].pml >= Const500 || metrics[i].nml >= Const500) &&
+        std::max(metrics[i].pml, metrics[i].nml) > 3 * std::min(metrics[i].pml, metrics[i].nml))
+      {
+        pm = metrics[i].pml;
+        nm = metrics[i].nml;
+      }
+      const int norm1 = (int)((metrics[i].pc / 6.0 * factor) + 0.5);
+      const int norm2 = (int)((metrics[i].nc / 6.0 * factor) + 0.5);
+      const int mtn1 = (int)((pm / 6.0 * factor) + 0.5);
+      const int mtn2 = (int)((nm / 6.0 * factor) + 0.5);
+      const BlockMatchDecision decision = selectMatchFromMetrics(current, candidate, norm1, norm2, mtn1, mtn2, slowMode, metrics[i].samples);
+      matches[i] = uint8_t(decision.match);
+      if (blockUnknowns)
+        known[i] = decision.reliable ? 1 : 0;
+    }
+  }
+}
+
+
+int TFM::compareFieldsBlock(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1, int match2,
+  std::vector<BlockFieldMetrics> &metrics)
+{
+  if (vi->format->bytesPerSample == 1)
+    return compareFieldsBlock_core<uint8_t>(prv, src, nxt, match1, match2, metrics);
+  else
+    return compareFieldsBlock_core<uint16_t>(prv, src, nxt, match1, match2, metrics);
+}
+
+
+template<typename pixel_t>
+int TFM::compareFieldsBlock_core(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1, int match2,
+  std::vector<BlockFieldMetrics> &metrics)
+{
+  const int bits_per_pixel = vi->format->bitsPerSample;
+  const int stop = vi->format->numPlanes == 1 || !mChroma ? 1 : 3;
+  const int incl = 1;
+  const int slowMode = slow == 2 ? 2 : slow == 1 ? 1 : 0;
+  const int blockMatchX = (vi->width + blockx - 1) / blockx;
+  const int blockMatchY = (vi->height + blocky - 1) / blocky;
+  const int Const23 = 23 << (bits_per_pixel - 8);
+  const int Const42 = 42 << (bits_per_pixel - 8);
+  for (int b = 0; b < stop; ++b)
+  {
+    const int plane = b;
+    uint8_t *mapp = vsapi->getWritePtr(map.get(), plane);
+    int map_pitch = vsapi->getStride(map.get(), plane);
+    const pixel_t* prvp = reinterpret_cast<const pixel_t*>(vsapi->getReadPtr(prv, plane));
+    const int prv_pitch = vsapi->getStride(prv, plane) / sizeof(pixel_t);
+    const pixel_t* srcp = reinterpret_cast<const pixel_t*>(vsapi->getReadPtr(src, plane));
+    const int src_pitch = vsapi->getStride(src, plane) / sizeof(pixel_t);
+    const int Width = vsapi->getFrameWidth(src, plane);
+    const int Height = vsapi->getFrameHeight(src, plane);
+    const pixel_t* nxtp = reinterpret_cast<const pixel_t*>(vsapi->getReadPtr(nxt, plane));
+    const int nxt_pitch = vsapi->getStride(nxt, plane) / sizeof(pixel_t);
+    int startx = 8 >> (plane ? vi->format->subSamplingW : 0);
+    int stopx = Width - startx;
+    getMatchXRange(plane, startx, stopx);
+    const pixel_t* prvpf = nullptr, * curf = nullptr, * nxtpf = nullptr;
+    int prvf_pitch = 0, curf_pitch, nxtf_pitch = 0;
+    curf_pitch = src_pitch << 1;
+    int y0a = plane == 0 ? y0 : y0 >> vi->format->subSamplingH;
+    int y1a = plane == 0 ? y1 : y1 >> vi->format->subSamplingH;
+    int tpitch_current = plane == 0 ? tpitchy : tpitchuv;
+    const bool noBandExclusion = (y0a == y1a);
+    if (y0a >= 2) y0a = y0a - 2;
+    if (y1a <= Height - 2) y1a = y1a + 2;
+    if (slowMode > 0)
+      memset(mapp, 0, Height * map_pitch);
+    if (match1 < 3)
+    {
+      curf = srcp + ((3 - field)*src_pitch);
+      mapp = mapp + ((field == 1 ? 1 : 2)*map_pitch);
+    }
+    if (match1 == 0)
+    {
+      prvf_pitch = prv_pitch << 1;
+      prvpf = prvp + ((field == 1 ? 1 : 2)*prv_pitch);
+    }
+    else if (match1 == 1)
+    {
+      prvf_pitch = src_pitch << 1;
+      prvpf = srcp + ((field == 1 ? 1 : 2)*src_pitch);
+    }
+    else if (match1 == 2)
+    {
+      prvf_pitch = nxt_pitch << 1;
+      prvpf = nxtp + ((field == 1 ? 1 : 2)*nxt_pitch);
+    }
+    else if (match1 == 3)
+    {
+      curf = srcp + ((2 + field)*src_pitch);
+      prvf_pitch = prv_pitch << 1;
+      prvpf = prvp + ((field == 1 ? 2 : 1)*prv_pitch);
+      mapp = mapp + ((field == 1 ? 2 : 1)*map_pitch);
+    }
+    else if (match1 == 4)
+    {
+      curf = srcp + ((2 + field)*src_pitch);
+      prvf_pitch = nxt_pitch << 1;
+      prvpf = nxtp + ((field == 1 ? 2 : 1)*nxt_pitch);
+      mapp = mapp + ((field == 1 ? 2 : 1)*map_pitch);
+    }
+    if (match2 == 0)
+    {
+      nxtf_pitch = prv_pitch << 1;
+      nxtpf = prvp + ((field == 1 ? 1 : 2)*prv_pitch);
+    }
+    else if (match2 == 1)
+    {
+      nxtf_pitch = src_pitch << 1;
+      nxtpf = srcp + ((field == 1 ? 1 : 2)*src_pitch);
+    }
+    else if (match2 == 2)
+    {
+      nxtf_pitch = nxt_pitch << 1;
+      nxtpf = nxtp + ((field == 1 ? 1 : 2)*nxt_pitch);
+    }
+    else if (match2 == 3)
+    {
+      nxtf_pitch = prv_pitch << 1;
+      nxtpf = prvp + ((field == 1 ? 2 : 1)*prv_pitch);
+    }
+    else if (match2 == 4)
+    {
+      nxtf_pitch = nxt_pitch << 1;
+      nxtpf = nxtp + ((field == 1 ? 2 : 1)*nxt_pitch);
+    }
+    const pixel_t* prvppf = prvpf - prvf_pitch;
+    const pixel_t* prvnf = prvpf + prvf_pitch;
+    const pixel_t* prvnnf = prvnf + prvf_pitch;
+    const pixel_t* curpf = curf - curf_pitch;
+    const pixel_t* curnf = curf + curf_pitch;
+    const pixel_t* nxtppf = nxtpf - nxtf_pitch;
+    const pixel_t* nxtnf = nxtpf + nxtf_pitch;
+    const pixel_t* nxtnnf = nxtnf + nxtf_pitch;
+    map_pitch <<= 1;
+    uint8_t* mapn = mapp + map_pitch;
+    if (slowMode == 0)
+    {
+      if ((match1 >= 3 && field == 1) || (match1 < 3 && field != 1))
+        buildDiffMapPlane2<pixel_t>(reinterpret_cast<const uint8_t*>(prvpf - prvf_pitch), reinterpret_cast<const uint8_t*>(nxtpf - nxtf_pitch),
+          mapp - map_pitch, prvf_pitch * sizeof(pixel_t), nxtf_pitch * sizeof(pixel_t), map_pitch, Height >> 1, Width, bits_per_pixel);
+      else
+        buildDiffMapPlane2<pixel_t>(reinterpret_cast<const uint8_t*>(prvnf - prvf_pitch), reinterpret_cast<const uint8_t*>(nxtnf - nxtf_pitch),
+          mapn - map_pitch, prvf_pitch * sizeof(pixel_t), nxtf_pitch * sizeof(pixel_t), map_pitch, Height >> 1, Width, bits_per_pixel);
+    }
+    else
+    {
+      if ((match1 >= 3 && field == 1) || (match1 < 3 && field != 1))
+        buildDiffMapPlane_Planar<pixel_t>(reinterpret_cast<const uint8_t*>(prvpf), reinterpret_cast<const uint8_t*>(nxtpf), mapp,
+          prvf_pitch * sizeof(pixel_t), nxtf_pitch * sizeof(pixel_t), map_pitch, Height, Width, tpitch_current, bits_per_pixel);
+      else
+        buildDiffMapPlane_Planar<pixel_t>(reinterpret_cast<const uint8_t*>(prvnf), reinterpret_cast<const uint8_t*>(nxtnf), mapn,
+          prvf_pitch * sizeof(pixel_t), nxtf_pitch * sizeof(pixel_t), map_pitch, Height, Width, tpitch_current, bits_per_pixel);
+    }
+    for (int y = 2; y < Height - 2; y += 2)
+    {
+      if (useMatchBandRow(y, y0a, y1a, noBandExclusion))
+      {
+        for (int x = startx; x < stopx; x += incl)
+        {
+          const int eax = slowMode == 0 ? (mapp[x] << 2) + mapn[x] : (mapp[x] << 3) + mapn[x];
+          if ((eax & 0xFF) == 0)
+            continue;
+          const int lumaX = x << (plane ? vi->format->subSamplingW : 0);
+          const int lumaY = y << (plane ? vi->format->subSamplingH : 0);
+          const int blockIndex = std::min(lumaY / blocky, blockMatchY - 1) * blockMatchX + std::min(lumaX / blockx, blockMatchX - 1);
+          BlockFieldMetrics &blockMetric = metrics[blockIndex];
+          ++blockMetric.samples;
+          int a_curr = curpf[x] + (curf[x] << 2) + curnf[x];
+          int a_prev = 3 * (prvpf[x] + prvnf[x]);
+          int diff_p_c = abs(a_prev - a_curr);
+          if (diff_p_c > Const23)
+          {
+            if (slowMode == 0 || (eax & 9) != 0)
+              blockMetric.pc += diff_p_c;
+            if (diff_p_c > Const42)
+            {
+              if ((eax & (slowMode == 0 ? 10 : 18)) != 0)
+                blockMetric.pm += diff_p_c;
+              if (slowMode > 0 && (eax & 36) != 0)
+                blockMetric.pml += diff_p_c;
+            }
+          }
+          int a_next = 3 * (nxtpf[x] + nxtnf[x]);
+          int diff_n_c = abs(a_next - a_curr);
+          if (diff_n_c > Const23)
+          {
+            if (slowMode == 0 || (eax & 9) != 0)
+              blockMetric.nc += diff_n_c;
+            if (diff_n_c > Const42)
+            {
+              if ((eax & (slowMode == 0 ? 10 : 18)) != 0)
+                blockMetric.nm += diff_n_c;
+              if (slowMode > 0 && (eax & 36) != 0)
+                blockMetric.nml += diff_n_c;
+            }
+          }
+          if (slowMode == 2 && field == 0 && (eax & 56) != 0)
+          {
+            a_prev = prvppf[x] + (prvpf[x] << 2) + prvnf[x];
+            a_curr = 3 * (curpf[x] + curf[x]);
+            diff_p_c = abs(a_prev - a_curr);
+            if (diff_p_c > Const23)
+            {
+              if ((eax & 8) != 0)
+                blockMetric.pc += diff_p_c;
+              if (diff_p_c > Const42)
+              {
+                if ((eax & 16) != 0)
+                  blockMetric.pm += diff_p_c;
+                if ((eax & 32) != 0)
+                  blockMetric.pml += diff_p_c;
+              }
+            }
+            a_next = nxtppf[x] + (nxtpf[x] << 2) + nxtnf[x];
+            diff_n_c = abs(a_next - a_curr);
+            if (diff_n_c > Const23)
+            {
+              if ((eax & 8) != 0)
+                blockMetric.nc += diff_n_c;
+              if (diff_n_c > Const42)
+              {
+                if ((eax & 16) != 0)
+                  blockMetric.nm += diff_n_c;
+                if ((eax & 32) != 0)
+                  blockMetric.nml += diff_n_c;
+              }
+            }
+          }
+          else if (slowMode == 2 && field == 1 && (eax & 7) != 0)
+          {
+            a_prev = prvpf[x] + (prvnf[x] << 2) + prvnnf[x];
+            a_curr = 3 * (curf[x] + curnf[x]);
+            diff_p_c = abs(a_prev - a_curr);
+            if (diff_p_c > Const23)
+            {
+              if ((eax & 1) != 0)
+                blockMetric.pc += diff_p_c;
+              if (diff_p_c > Const42)
+              {
+                if ((eax & 2) != 0)
+                  blockMetric.pm += diff_p_c;
+                if ((eax & 4) != 0)
+                  blockMetric.pml += diff_p_c;
+              }
+            }
+            a_next = nxtpf[x] + (nxtnf[x] << 2) + nxtnnf[x];
+            diff_n_c = abs(a_next - a_curr);
+            if (diff_n_c > Const23)
+            {
+              if ((eax & 1) != 0)
+                blockMetric.nc += diff_n_c;
+              if (diff_n_c > Const42)
+              {
+                if ((eax & 2) != 0)
+                  blockMetric.nm += diff_n_c;
+                if ((eax & 4) != 0)
+                  blockMetric.nml += diff_n_c;
+              }
+            }
+          }
+        }
+      }
+      mapp += map_pitch;
+      prvpf += prvf_pitch;
+      curpf += curf_pitch;
+      prvnf += prvf_pitch;
+      curf += curf_pitch;
+      nxtpf += nxtf_pitch;
+      curnf += curf_pitch;
+      nxtnf += nxtf_pitch;
+      mapn += map_pitch;
+      if (slowMode == 2)
+      {
+        if (field == 0)
+        {
+          prvppf += prvf_pitch;
+          nxtppf += nxtf_pitch;
+        }
+        else
+        {
+          prvnnf += prvf_pitch;
+          nxtnnf += nxtf_pitch;
+        }
+      }
+    }
+  }
+  return slowMode;
+}
 
 template<typename pixel_t>
 int TFM::compareFields_core(const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, int match1,
@@ -2680,6 +3069,38 @@ void TFM::putFrameProperties(VSFrameRef *dst, int match, int combed, bool d2vfil
     vsapi->propSetInt(props, PROP_TFMPP, PP, paReplace);
 }
 
+
+void TFM::putBlockMatchProperties(VSFrameRef *dst, const VSFrameRef *prv, const VSFrameRef *src, const VSFrameRef *nxt, VSCore *core)
+{
+    VSMap *props = vsapi->getFramePropsRW(dst);
+    std::vector<uint8_t> matches;
+    std::vector<uint8_t> known;
+    calculateBlockMatches(prv, src, nxt, matches, known);
+    const int xblocks = (vi->width + blockx - 1) / blockx;
+    const int yblocks = (vi->height + blocky - 1) / blocky;
+    std::vector<uint8_t> encodedMatches(matches.size());
+    for (size_t i = 0; i < matches.size(); ++i)
+        encodedMatches[i] = blockUnknowns && !known[i] ? 0 : matches[i] + 1;
+    vsapi->propSetData(props, PROP_TFMBlockMatch, reinterpret_cast<const char *>(encodedMatches.data()), int(encodedMatches.size()), paReplace);
+    vsapi->propSetInt(props, PROP_TFMBlockMatchX, xblocks, paReplace);
+    vsapi->propSetInt(props, PROP_TFMBlockMatchY, yblocks, paReplace);
+    vsapi->propSetInt(props, PROP_TFMBlockMatchBlockX, blockx, paReplace);
+    vsapi->propSetInt(props, PROP_TFMBlockMatchBlockY, blocky, paReplace);
+    if (blockmatch == 2) {
+        VSFrameRef *blockFrame = vsapi->newVideoFrame(maskFormat, xblocks, yblocks, nullptr, core);
+        uint8_t *dstp = vsapi->getWritePtr(blockFrame, 0);
+        const int stride = vsapi->getStride(blockFrame, 0);
+        const uint8_t *srcp = encodedMatches.data();
+        for (int y = 0; y < yblocks; ++y) {
+            memcpy(dstp, srcp, xblocks);
+            dstp += stride;
+            srcp += xblocks;
+        }
+        vsapi->propSetFrame(props, PROP_TFMBlockMatchClip, blockFrame, paReplace);
+        vsapi->freeFrame(blockFrame);
+    }
+}
+
 //template<typename pixel_t>
 //void TFM::putHint_core(VSFrameRef *dst, int match, int combed, bool d2vfilm)
 //{
@@ -2790,14 +3211,17 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
   int _slow, bool _mChroma, int _cNum, int _cthresh, int _MI, bool _chroma, int _blockx,
   int _blocky, int _x0, int _x1, int _y0, int _y1, bool _yInvert, const char* _d2v, int _ovrDefault, int _flags, double _scthresh,
   int _micout, int _micmatching, const char* _trimIn, bool _usehints, int _metric, bool _batch,
-  bool _ubsco, bool _mmsco, int _opt, bool _maskOutput, const VSAPI *_vsapi, VSCore *core)
+  bool _ubsco, bool _mmsco, int _opt, int _blockmatch, int _blockUnknowns, int _blockUnknownThresholdAbs, double _blockUnknownThresholdRel,
+  bool _maskOutput, const VSAPI *_vsapi, VSCore *core, int _cthresh2, double _hthresh)
     : vsapi(_vsapi), child(_child),
   order(_order), field(_field), mode(_mode), PP(_PP), ovr(_ovr), ovr_s(_ovr_s), input(_input), output(_output),
   outputC(_outputC), debug(_debug), display(_display), slow(_slow), mChroma(_mChroma), cNum(_cNum),
-  cthresh(_cthresh), MI(_MI), chroma(_chroma), blockx(_blockx), blocky(_blocky), x0(_x0), x1(_x1), y0(_y0),
+  cthresh(_cthresh), cthresh2(_cthresh2), hthresh(_hthresh), MI(_MI), chroma(_chroma), blockx(_blockx), blocky(_blocky), x0(_x0), x1(_x1), y0(_y0),
   y1(_y1), yInvert(_yInvert), d2v(_d2v), ovrDefault(_ovrDefault), flags(_flags), scthresh(_scthresh), micout(_micout),
   micmatching(_micmatching), trimIn(_trimIn), usehints(_usehints), metric(_metric),
-  batch(_batch), ubsco(_ubsco), mmsco(_mmsco), opt(_opt), maskOutput(_maskOutput), maskFormat(nullptr), cArray(nullptr, nullptr), tbuffer(nullptr, nullptr),
+  batch(_batch), ubsco(_ubsco), mmsco(_mmsco), opt(_opt), blockmatch(_blockmatch), blockUnknowns(_blockUnknowns != 0),
+  blockUnknownThresholdAbs(_blockUnknownThresholdAbs), blockUnknownThresholdRel(_blockUnknownThresholdRel),
+  maskOutput(_maskOutput), maskFormat(nullptr), cArray(nullptr, nullptr), tbuffer(nullptr, nullptr),
   map(nullptr, nullptr), cmask(nullptr, nullptr)
 {
     vi = vsapi->getVideoInfo(child);
@@ -2863,6 +3287,14 @@ TFM::TFM(VSNodeRef *_child, int _order, int _field, int _mode, int _PP, const ch
     throw TIVTCError("TFM:  micmatching must be set to 0, 1, 2, 3, or 4!");
   if (opt < 0 || opt > 4)
     throw TIVTCError("TFM:  opt must be set to 0, 1, 2, 3, or 4!");
+  if (_blockmatch < 0 || _blockmatch > 2)
+    throw TIVTCError("TFM:  blockmatch must be set to 0, 1, or 2!");
+  if (_blockUnknowns != 0 && _blockUnknowns != 1)
+    throw TIVTCError("TFM:  block_unknowns must be set to 0 or 1!");
+  if (_blockUnknownThresholdAbs < 0)
+    throw TIVTCError("TFM:  th_abs must be greater than or equal to 0!");
+  if (!(_blockUnknownThresholdRel >= 1.0))
+    throw TIVTCError("TFM:  th_rel must be greater than or equal to 1.0!");
   if (metric != 0 && metric != 1)
     throw TIVTCError("TFM:  metric must be set to 0 or 1!");
   if (scthresh < 0.0 || scthresh > 100.0)

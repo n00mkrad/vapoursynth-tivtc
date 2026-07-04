@@ -684,13 +684,11 @@ void check_combing_c(const pixel_t* srcp, uint8_t* cmkp, int width, int height, 
   const pixel_t* srcpn = srcp + src_pitch;
   const pixel_t* srcpnn = srcp + src_pitch * 2;
 
-  int increment = 1;
-
   const int cthresh6 = cthresh * 6;
   // no luma masking
   for (int y = 0; y < height; ++y)
   {
-    for (int x = 0; x < width; x += increment)
+    for (int x = 0; x < width; ++x)
     {
       const int sFirst = srcp[x] - srcpp[x];
       const int sSecond = srcp[x] - srcpn[x];
@@ -839,15 +837,6 @@ __attribute__((__target__("sse4.1")))
 void check_combing_uint16_SSE4(const uint16_t* srcp, uint8_t* dstp, int width, int height, int src_pitch, int dst_pitch, int cthresh)
 {
   // src_pitch ok for the 16 bit pointer
-/*
-  const int sFirst = srcp[x] - srcpp[x];
-  const int sSecond = srcp[x] - srcpn[x];
-  if ((sFirst > cthresh && sSecond > cthresh) || (sFirst < -cthresh && sSecond < -cthresh))
-  {
-    if (abs(srcppp[x] + (srcp[x] << 2) + srcpnn[x] - (3 * (srcpp[x] + srcpn[x]))) > cthresh6)
-      cmkp[x] = 0xFF;
-  }
-*/
   unsigned int cthresht = std::min(std::max(65535 - cthresh - 1, 0), 65535);
   auto thresh = _mm_set1_epi16(cthresht); // cmp by adds and check saturation
 
@@ -901,9 +890,6 @@ void check_combing_uint16_SSE4(const uint16_t* srcp, uint8_t* dstp, int width, i
         auto sum2_lo = _mm_add_epi32(_mm_slli_epi32(curr_lo, 2), prevprev_lo); // pp + c*4
         auto sum2_hi = _mm_add_epi32(_mm_slli_epi32(curr_hi, 2), prevprev_hi); // pp + c*4
 
-/*        if (abs(srcppp[x] + (srcp[x] << 2) + srcpnn[x] - (3 * (srcpp[x] + srcpn[x]))) > cthresh6)
-          cmkp[x] = 0xFF;
-          */
         auto nextnext = _mm_load_si128(reinterpret_cast<const __m128i*>(srcp + src_pitch * 2 + x));
         auto nextnext_lo = _mm_unpacklo_epi16(nextnext, zero);
         auto nextnext_hi = _mm_unpackhi_epi16(nextnext, zero);
@@ -996,46 +982,6 @@ void check_combing_SSE2_Metric1(const uint8_t *srcp, uint8_t *dstp,
 
 }
 
-
-void check_combing_SSE2_Luma_Metric1(const uint8_t *srcp, uint8_t *dstp,
-  int width, int height, int src_pitch, int dst_pitch, int cthreshsq)
-{
-  __m128i thresh = _mm_set1_epi32(cthreshsq);
-  __m128i lumaMask = _mm_set1_epi16(0x00FF);
-  __m128i zero = _mm_setzero_si128();
-  while (height--) {
-    for (int x = 0; x < width; x += 16) {
-      auto next = _mm_load_si128(reinterpret_cast<const __m128i *>(srcp + src_pitch + x));
-      auto curr = _mm_load_si128(reinterpret_cast<const __m128i *>(srcp + x));
-      auto prev = _mm_load_si128(reinterpret_cast<const __m128i *>(srcp - src_pitch + x));
-      
-      next = _mm_and_si128(next, lumaMask);
-      curr = _mm_and_si128(curr, lumaMask);
-      prev = _mm_and_si128(prev, lumaMask);
-
-      auto diff_prev_curr = _mm_subs_epi16(prev, curr);
-      auto diff_next_curr = _mm_subs_epi16(next, curr);
-
-      auto diff_prev_curr_lo = _mm_unpacklo_epi16(diff_prev_curr, zero);
-      auto diff_prev_curr_hi = _mm_unpackhi_epi16(diff_prev_curr, zero);
-      auto diff_next_curr_lo = _mm_unpacklo_epi16(diff_next_curr, zero);
-      auto diff_next_curr_hi = _mm_unpackhi_epi16(diff_next_curr, zero);
-
-      auto res_lo = _mm_madd_epi16(diff_prev_curr_lo, diff_next_curr_lo);
-      auto res_hi = _mm_madd_epi16(diff_prev_curr_hi, diff_next_curr_hi);
-
-      auto cmp_lo = _mm_cmpgt_epi32(res_lo, thresh);
-      auto cmp_hi = _mm_cmpgt_epi32(res_hi, thresh);
-
-      auto cmp = _mm_packs_epi32(cmp_lo, cmp_hi);
-      auto cmp_masked = _mm_and_si128(cmp, lumaMask);
-
-      _mm_store_si128(reinterpret_cast<__m128i *>(dstp + x), cmp_masked);
-    }
-    srcp += src_pitch;
-    dstp += dst_pitch;
-  }
-}
 
 template<int blockSizeY>
 void compute_sum_8xN_sse2(const uint8_t *srcp, int pitch, int &sum)
@@ -1225,16 +1171,16 @@ void do_FillCombedPlanarUpdateCmaskByUV(uint8_t* cmkp, uint8_t* cmkpU, uint8_t* 
     for (int x = 1; x < Width - 1; ++x)
     {
       if (
-        (cmkpV[x] == 0xFF &&
-          (cmkpV[x - 1] == 0xFF || cmkpV[x + 1] == 0xFF ||
-            cmkppV[x - 1] == 0xFF || cmkppV[x] == 0xFF || cmkppV[x + 1] == 0xFF ||
-            cmkpnV[x - 1] == 0xFF || cmkpnV[x] == 0xFF || cmkpnV[x + 1] == 0xFF
+        (cmkpV[x] != 0 &&
+          (cmkpV[x - 1] != 0 || cmkpV[x + 1] != 0 ||
+            cmkppV[x - 1] != 0 || cmkppV[x] != 0 || cmkppV[x + 1] != 0 ||
+            cmkpnV[x - 1] != 0 || cmkpnV[x] != 0 || cmkpnV[x + 1] != 0
             )
           ) ||
-        (cmkpU[x] == 0xFF &&
-          (cmkpU[x - 1] == 0xFF || cmkpU[x + 1] == 0xFF ||
-            cmkppU[x - 1] == 0xFF || cmkppU[x] == 0xFF || cmkppU[x + 1] == 0xFF ||
-            cmkpnU[x - 1] == 0xFF || cmkpnU[x] == 0xFF || cmkpnU[x + 1] == 0xFF
+        (cmkpU[x] != 0 &&
+          (cmkpU[x - 1] != 0 || cmkpU[x + 1] != 0 ||
+            cmkppU[x - 1] != 0 || cmkppU[x] != 0 || cmkppU[x + 1] != 0 ||
+            cmkpnU[x - 1] != 0 || cmkpnU[x] != 0 || cmkpnU[x + 1] != 0
             )
           )
         )

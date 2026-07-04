@@ -24,10 +24,12 @@
 */
 
 #include <cstring>
+#include <cstdint>
 #include "TFM.h"
 #include "TFMasm.h"
 #include "TCommonASM.h"
 #include <algorithm>
+#include <vector>
 
 
 template<int planarType>
@@ -58,7 +60,7 @@ void checkCombedPlanarAnalyze_core(const VSVideoInfo *vi, int cthresh, bool chro
 
   const bool use_sse2 = cpuFlags->sse2;
   const bool use_sse4 = cpuFlags->sse4_1;
-  // cthresh: Area combing threshold used for combed frame detection.
+  // cthresh: Per-pixel combing threshold used for combed frame detection.
   // This essentially controls how "strong" or "visible" combing must be to be detected.
   // Good values are from 6 to 12. If you know your source has a lot of combed frames set 
   // this towards the low end(6 - 7). If you know your source has very few combed frames set 
@@ -89,10 +91,6 @@ void checkCombedPlanarAnalyze_core(const VSVideoInfo *vi, int cthresh, bool chro
     uint8_t* cmkp = vsapi->getWritePtr(cmask, b);
     const int cmk_pitch = vsapi->getStride(cmask, b);
 
-    if (scaled_cthresh < 0) {
-      memset(cmkp, 255, Height * cmk_pitch); // mask. Always 8 bits 
-      continue;
-    }
     memset(cmkp, 0, Height * cmk_pitch);
 
     if (metric == 0)
@@ -232,14 +230,159 @@ template void checkCombedPlanarAnalyze_core<uint8_t>(const VSVideoInfo *vi, int 
 template void checkCombedPlanarAnalyze_core<uint16_t>(const VSVideoInfo *vi, int cthresh, bool chroma, const CPUFeatures *cpuFlags, int metric, const VSFrameRef *src, VSFrameRef* cmask, const VSAPI *vsapi);
 
 
-VSFrameRef *createCombedMaskFrame(const VSVideoInfo *vi, const VSFrameRef *src, int cthresh, bool chroma, int metric,
+static int isqrt_int64(int64_t value)
+{
+  int64_t result = 0;
+  int64_t bit = (int64_t)1 << 62;
+  while (bit > value)
+    bit >>= 2;
+  while (bit != 0)
+  {
+    if (value >= result + bit)
+    {
+      value -= result + bit;
+      result = (result >> 1) + bit;
+    }
+    else
+    {
+      result >>= 1;
+    }
+    bit >>= 2;
+  }
+  return (int)result;
+}
+
+
+static uint8_t scaleMaskStrengthTo8(int value, int bits_per_pixel)
+{
+  if (bits_per_pixel > 8)
+    value >>= bits_per_pixel - 8;
+  value = std::min(std::max(value, 0), 255);
+  return (uint8_t)std::min(value * 32, 255);
+}
+
+
+static bool passesHorizontalGate(int vertical, int horizontal, double hthresh)
+{
+  return hthresh <= 0.0 || vertical > hthresh * horizontal;
+}
+
+
+static void applyLumaVerticalConnectivity(VSFrameRef* cmask, const VSAPI *vsapi)
+{
+  uint8_t* cmkp = vsapi->getWritePtr(cmask, 0);
+  const int cmk_pitch = vsapi->getStride(cmask, 0);
+  const int Width = vsapi->getFrameWidth(cmask, 0);
+  const int Height = vsapi->getFrameHeight(cmask, 0);
+  std::vector<uint8_t> src(Width * Height);
+  for (int y = 0; y < Height; ++y)
+    memcpy(src.data() + y * Width, cmkp + y * cmk_pitch, Width);
+  memset(cmkp, 0, Height * cmk_pitch);
+  for (int y = 1; y < Height - 1; ++y)
+  {
+    uint8_t* dstp = cmkp + y * cmk_pitch;
+    const uint8_t* prev = src.data() + (y - 1) * Width;
+    const uint8_t* curr = src.data() + y * Width;
+    const uint8_t* next = src.data() + (y + 1) * Width;
+    for (int x = 0; x < Width; ++x)
+      dstp[x] = (prev[x] && curr[x] && next[x]) ? curr[x] : 0;
+  }
+}
+
+
+template<typename pixel_t>
+static void checkCombedPlanarAnalyzeForMask_core(const VSVideoInfo *vi, int cthresh, int cthresh2, double hthresh, bool chroma, int metric, const VSFrameRef *src, VSFrameRef* cmask, const VSAPI *vsapi)
+{
+  const int bits_per_pixel = vi->format->bitsPerSample;
+  const int scaled_cthresh = cthresh << (bits_per_pixel - 8);
+  const int scaled_cthresh2 = cthresh2 << (bits_per_pixel - 8);
+  const int64_t cthreshsq = (int64_t)scaled_cthresh * scaled_cthresh;
+  const int stop = chroma ? vi->format->numPlanes : 1;
+  const bool graded = cthresh == 0;
+
+  for (int b = 0; b < stop; ++b)
+  {
+    const pixel_t* srcp = reinterpret_cast<const pixel_t*>(vsapi->getReadPtr(src, b));
+    const int src_pitch = vsapi->getStride(src, b) / sizeof(pixel_t);
+    uint8_t* cmkp = vsapi->getWritePtr(cmask, b);
+    const int cmk_pitch = vsapi->getStride(cmask, b);
+    const int Width = vsapi->getFrameWidth(src, b);
+    const int Height = vsapi->getFrameHeight(src, b);
+    memset(cmkp, 0, Height * cmk_pitch);
+    for (int y = 2; y < Height - 2; ++y)
+    {
+      const pixel_t* srcppp = srcp + (y - 2) * src_pitch;
+      const pixel_t* srcpp = srcp + (y - 1) * src_pitch;
+      const pixel_t* srcpc = srcp + y * src_pitch;
+      const pixel_t* srcpn = srcp + (y + 1) * src_pitch;
+      const pixel_t* srcpnn = srcp + (y + 2) * src_pitch;
+      uint8_t* cmkpw = cmkp + y * cmk_pitch;
+      for (int x = 1; x < Width - 1; ++x)
+      {
+        const int c = srcpc[x];
+        const int p = srcpp[x];
+        const int n = srcpn[x];
+        const int pp = srcppp[x];
+        const int nn = srcpnn[x];
+        const int sFirst = c - p;
+        const int sSecond = c - n;
+        const int vertical = std::min(abs(sFirst), abs(sSecond));
+        const int horizontal = (abs(c - srcpc[x - 1]) + abs(c - srcpc[x + 1]) + 1) >> 1;
+        if (abs(c - pp) > scaled_cthresh2 || abs(c - nn) > scaled_cthresh2 || !passesHorizontalGate(vertical, horizontal, hthresh))
+          continue;
+        if (metric == 0)
+        {
+          const bool same_direction = (sFirst > 0 && sSecond > 0) || (sFirst < 0 && sSecond < 0);
+          if (!same_direction)
+            continue;
+          const int curvature = abs(pp + (c << 2) + nn - (3 * (p + n)));
+          if (graded)
+          {
+            const int strength = std::min(vertical, curvature / 6);
+            cmkpw[x] = scaleMaskStrengthTo8(strength, bits_per_pixel);
+          }
+          else if (vertical > scaled_cthresh && curvature > scaled_cthresh * 6)
+          {
+            cmkpw[x] = 0xFF;
+          }
+        }
+        else
+        {
+          const int64_t product = (int64_t)sFirst * sSecond;
+          if (graded)
+          {
+            if (product > 0)
+              cmkpw[x] = scaleMaskStrengthTo8(isqrt_int64(product), bits_per_pixel);
+          }
+          else if (product > cthreshsq)
+          {
+            cmkpw[x] = 0xFF;
+          }
+        }
+      }
+    }
+  }
+
+  if (chroma)
+  {
+    if (vi->format->subSamplingW == 1 && vi->format->subSamplingH == 1) FillCombedPlanarUpdateCmaskByUV<420>(cmask, vsapi);
+    else if (vi->format->subSamplingW == 1 && vi->format->subSamplingH == 0) FillCombedPlanarUpdateCmaskByUV<422>(cmask, vsapi);
+    else if (vi->format->subSamplingW == 0 && vi->format->subSamplingH == 0) FillCombedPlanarUpdateCmaskByUV<444>(cmask, vsapi);
+    else if (vi->format->subSamplingW == 2 && vi->format->subSamplingH == 0) FillCombedPlanarUpdateCmaskByUV<411>(cmask, vsapi);
+  }
+  applyLumaVerticalConnectivity(cmask, vsapi);
+}
+
+
+VSFrameRef *createCombedMaskFrame(const VSVideoInfo *vi, const VSFrameRef *src, int cthresh, int cthresh2, double hthresh, bool chroma, int metric,
   const CPUFeatures *cpuFlags, const VSFormat *maskFormat, const VSAPI *vsapi, VSCore *core)
 {
+  (void)cpuFlags;
   VSFrameRef *cmask = vsapi->newVideoFrame(vi->format, vi->width, vi->height, nullptr, core);
   if (vi->format->bytesPerSample == 1)
-    checkCombedPlanarAnalyze_core<uint8_t>(vi, cthresh, chroma, cpuFlags, metric, src, cmask, vsapi);
+    checkCombedPlanarAnalyzeForMask_core<uint8_t>(vi, cthresh, cthresh2, hthresh, chroma, metric, src, cmask, vsapi);
   else
-    checkCombedPlanarAnalyze_core<uint16_t>(vi, cthresh, chroma, cpuFlags, metric, src, cmask, vsapi);
+    checkCombedPlanarAnalyzeForMask_core<uint16_t>(vi, cthresh, cthresh2, hthresh, chroma, metric, src, cmask, vsapi);
   VSFrameRef *dst = vsapi->newVideoFrame(maskFormat, vi->width, vi->height, src, core);
   const uint8_t *srcp = vsapi->getReadPtr(cmask, 0);
   const int src_pitch = vsapi->getStride(cmask, 0);
